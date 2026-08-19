@@ -34,7 +34,8 @@ import {
 	type SubagentDiagnostic,
 	type SubagentPreparedMessage,
 	type SubagentPreparationOutput,
-} from "@zihanw/pi-forge/subagent";
+} from "../contract/index.ts";
+import type { ForgePrepareResponse } from "@zihanw/pi-forge/subagent";
 import type { ForgeHostSession } from "../host/session.ts";
 import {
 	MAX_SUBAGENT_TIMEOUT_MS,
@@ -86,7 +87,7 @@ export interface ForgeSubagentRuntimeOptions {
 	/** When false, do not construct the built-in subprocess/RPC backends (tests inject their own). */
 	builtInBackends?: boolean;
 	/** Tool catalog used to build the execution intent (defaults to the read-only subprocess catalog). */
-	intentToolCatalog?: import("@zihanw/pi-forge/subagent").BackendPreflightAccepted["toolCatalog"];
+	intentToolCatalog?: BackendPreflightAccepted["toolCatalog"];
 }
 
 interface RuntimeGeneration {
@@ -336,7 +337,7 @@ export function createForgeSubagentRuntime(
 	return { backendIds: () => [...backendIds], descriptors, prepare, discard, execute, takeReport, dispose };
 }
 
-function toPreparationOutput(prepared: import("@zihanw/pi-forge/subagent").ForgePrepareResponse): SubagentPreparationOutput {
+function toPreparationOutput(prepared: ForgePrepareResponse): SubagentPreparationOutput {
 	return {
 		systemPrompt: prepared.systemPrompt,
 		messages: prepared.messages as SubagentPreparedMessage[],
@@ -355,7 +356,7 @@ function toPreparationOutput(prepared: import("@zihanw/pi-forge/subagent").Forge
 function executionIntentFor(
 	request: AgentRequest,
 	snapshot: AgentProfileSnapshot,
-	toolCatalog: import("@zihanw/pi-forge/subagent").BackendPreflightAccepted["toolCatalog"],
+	toolCatalog: BackendPreflightAccepted["toolCatalog"],
 ): ExecutionIntent {
 	const negotiation = negotiateSubagentTools(
 		toolCatalog,
@@ -384,11 +385,11 @@ function executionIntentFor(
 	};
 }
 
-function forgeToolCatalog(): import("@zihanw/pi-forge/subagent").BackendPreflightAccepted["toolCatalog"] {
+function forgeToolCatalog(): BackendPreflightAccepted["toolCatalog"] {
 	return PI_READ_ONLY_TOOL_CATALOG.map((tool) => ({
 		...structuredClone(tool),
 		effects: [...tool.effects],
-	})) as import("@zihanw/pi-forge/subagent").BackendPreflightAccepted["toolCatalog"];
+	})) as BackendPreflightAccepted["toolCatalog"];
 }
 
 function preflightForHost(preflight: import("@zihanw/pi-subagent-runtime").BackendPreflightAccepted): BackendPreflightAccepted {

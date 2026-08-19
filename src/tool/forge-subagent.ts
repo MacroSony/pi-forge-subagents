@@ -1,7 +1,7 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { AgentResponse, SubagentDiagnostic } from "@zihanw/pi-forge/subagent";
+import type { AgentResponse, SubagentDiagnostic } from "../contract/index.ts";
 import type { ForgeSubagentPreparedRun, ForgeSubagentRuntime, SubagentBackendExecutionUpdate } from "../runtime/subagent-runtime.ts";
 import { loadForgeSubagentSettings, resolveSubagentProfilePolicy } from "../config/subagents.ts";
 import type { ForgeHostSession } from "../host/session.ts";
