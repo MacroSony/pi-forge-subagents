@@ -13,3 +13,9 @@
   `ForgeHostSession.resolveProfile`, backend preflight + sealing via
   `@zihanw/pi-subagent-runtime`, host compile through the host port, interactive
   approval, and execution. Integration test covers preflight->seal->prepare->execute.
+- Lane 3.5 parity:
+  - Added `forge_subagent_profiles` discovery tool.
+  - Added `/forge-agent backends|plan|run` commands.
+  - Added parallel-approval serialization and unattended backend pinning.
+  - Added `summaryInToolDescription` config support.
+  - Added read-only legacy `config.json.subagents` fallback.

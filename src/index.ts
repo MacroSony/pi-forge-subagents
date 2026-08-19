@@ -2,7 +2,10 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ForgePrepareRequest } from "@zihanw/pi-forge/subagent";
 import { ForgeHostSession } from "./host/session.ts";
 import { createForgeSubagentRuntime } from "./runtime/subagent-runtime.ts";
+import { registerForgeAgentCommand } from "./command/forge-agent.ts";
 import { registerForgeSubagentTool } from "./tool/forge-subagent.ts";
+import { canonicalProfileId, registerForgeSubagentProfilesTool, renderEmbeddedSummaryText, summarizeProfile } from "./tool/forge-subagent-profiles.ts";
+import { loadForgeSubagentSettings, resolveSubagentProfilePolicy } from "./config/subagents.ts";
 
 export { ForgeHostSession } from "./host/session.ts";
 export type { ForgeHostSessionOptions } from "./host/session.ts";
@@ -10,6 +13,9 @@ export { createForgeSubagentRuntime } from "./runtime/subagent-runtime.ts";
 export type { ForgeSubagentPreparedRun, ForgeSubagentRuntime, ForgeSubagentPreparationResult } from "./runtime/subagent-runtime.ts";
 export { registerForgeSubagentTool } from "./tool/forge-subagent.ts";
 export type { ForgeSubagentToolDetails, ForgeSubagentApprovalReceipt } from "./tool/forge-subagent.ts";
+export { registerForgeSubagentProfilesTool } from "./tool/forge-subagent-profiles.ts";
+export type { ForgeSubagentProfileSummary, ForgeSubagentProfilesToolDetails } from "./tool/forge-subagent-profiles.ts";
+export { registerForgeAgentCommand } from "./command/forge-agent.ts";
 export { loadForgeSubagentSettings, resolveSubagentProfilePolicy } from "./config/subagents.ts";
 export type { ForgeSubagentSettings, ForgeSubagentProfileSettings, ResolvedSubagentProfilePolicy } from "./config/subagents.ts";
 
@@ -30,9 +36,10 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 	let session: ForgeHostSession | undefined;
 	const runtime = createForgeSubagentRuntime(() => session);
 
-	pi.on("session_start", async (_event: unknown) => {
+	pi.on("session_start", async (_event: unknown, ctx: any) => {
 		session?.dispose();
 		session = await ForgeHostSession.connect(pi.events as never);
+		await refreshToolDescription(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -74,7 +81,24 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 		},
 	});
 
-	registerForgeSubagentTool(pi, runtime, { sessionProvider: () => session });
+	registerForgeSubagentProfilesTool(pi, () => session);
+	const refreshToolDescription = registerForgeSubagentTool(pi, runtime, {
+		sessionProvider: () => session,
+		summarize: async (ctx) => {
+			const settings = loadForgeSubagentSettings(ctx);
+			if (!settings.summaryInToolDescription) return undefined;
+			const current = session;
+			if (!current) return undefined;
+			const profiles = await current.listProfiles();
+			const enabled = profiles.flatMap((profile) => {
+				const id = canonicalProfileId(profile);
+				const policy = resolveSubagentProfilePolicy(settings, id);
+				return policy.enabled ? [summarizeProfile(profile, policy)] : [];
+			});
+			return renderEmbeddedSummaryText(enabled);
+		},
+	});
+	registerForgeAgentCommand(pi, runtime, () => session);
 
 	return {
 		get session() {

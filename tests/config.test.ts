@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_SUBAGENT_BACKEND_ID, loadForgeSubagentSettings, projectSubagentsConfigPath, resolveSubagentProfilePolicy } from "../src/config/subagents.ts";
 
+const TEST_GLOBAL_ROOT = join(tmpdir(), `pi-forge-subagents-global-${process.pid}`);
+process.env.PI_FORGE_GLOBAL_FORGE_DIR = TEST_GLOBAL_ROOT;
+
 function context(cwd: string, trusted = true) {
 	return { cwd, isProjectTrusted: () => trusted } as any;
 }
@@ -53,4 +56,56 @@ test("untrusted projects ignore project subagents.json settings", () => {
 
 test("config path helper is stable", () => {
 	assert.equal(projectSubagentsConfigPath("/tmp/proj"), "/tmp/proj/.pi/forge/subagents.json");
+});
+
+test("optional subagent config parses summaryInToolDescription", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-summary-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
+			summaryInToolDescription: true,
+			profiles: { "project:worker": { enabled: true } },
+		}), "utf8");
+		const settings = loadForgeSubagentSettings(context(cwd));
+		assert.equal(settings.summaryInToolDescription, true);
+		assert.equal(settings.summaryInToolDescriptionSource, "project");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("legacy config.json.subagents is a read-only fallback", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-legacy-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "forge", "config.json"), JSON.stringify({
+			subagents: {
+				backend: "pi-rpc-readonly",
+				timeoutMs: 90_000,
+				profiles: { "project:worker": { enabled: true } },
+			},
+		}), "utf8");
+		const settings = loadForgeSubagentSettings(context(cwd));
+		assert.equal(settings.backend, "pi-rpc-readonly");
+		assert.equal(settings.timeoutMs, 90_000);
+		assert.equal(settings.profiles["project:worker"]?.enabled, true);
+		assert.equal(settings.warnings.some((message) => /legacy config.json.subagents/.test(message)), true);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("bare project profile keys resolve from canonical selectors", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-bare-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
+			profiles: { worker: { enabled: true } },
+		}), "utf8");
+		const settings = loadForgeSubagentSettings(context(cwd));
+		const policy = resolveSubagentProfilePolicy(settings, "project:worker");
+		assert.equal(policy.enabled, true);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
 });

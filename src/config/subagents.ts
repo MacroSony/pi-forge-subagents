@@ -20,6 +20,8 @@ export interface ForgeSubagentSettings {
 	timeoutMs: number;
 	timeoutSource: "project" | "global" | "built-in";
 	allowAgentInvocationWithoutApproval?: boolean;
+	summaryInToolDescription?: boolean;
+	summaryInToolDescriptionSource?: "project" | "global";
 	profiles: Record<string, ForgeSubagentProfileSettings>;
 	warnings: string[];
 }
@@ -44,23 +46,44 @@ export function globalSubagentsConfigPath(): string {
 	return join(root, ".pi", "forge", "subagents.json");
 }
 
+export function projectLegacyForgeConfigPath(cwd: string): string {
+	return join(cwd, ".pi", "forge", "config.json");
+}
+
+export function globalLegacyForgeConfigPath(): string {
+	const env = process.env.PI_FORGE_GLOBAL_FORGE_DIR ?? process.env.PI_FORGE_GLOBAL_DIR;
+	const root = env ?? homedir();
+	return join(root, ".pi", "forge", "config.json");
+}
+
 export function loadForgeSubagentSettings(ctx: ExtensionContext): ForgeSubagentSettings {
 	const settings: ForgeSubagentSettings = {
 		timeoutMs: DEFAULT_SUBAGENT_TIMEOUT_MS,
 		timeoutSource: "built-in",
+		summaryInToolDescription: false,
 		profiles: Object.create(null) as Record<string, ForgeSubagentProfileSettings>,
 		warnings: [],
 	};
 
+	// Legacy config.json.subagents is read-only fallback material. Dedicated
+	// subagents.json values win over legacy values. To keep legacy as a true
+	// fallback, apply all legacy sections before any dedicated section.
+	const globalLegacy = readLegacySubagentsSection(globalLegacyForgeConfigPath(), settings.warnings);
+	if (globalLegacy) applySection(globalLegacy, "global", settings);
+
+	const projectLegacy = ctx.isProjectTrusted()
+		? readLegacySubagentsSection(projectLegacyForgeConfigPath(ctx.cwd), settings.warnings)
+		: undefined;
+	if (projectLegacy) applySection(projectLegacy, "project", settings);
+
 	const global = readConfigFile(globalSubagentsConfigPath(), settings.warnings);
 	if (global) applySection(global, "global", settings);
 
-	// Only trusted projects may contribute project-local subagent settings.
 	if (ctx.isProjectTrusted()) {
 		const project = readConfigFile(projectSubagentsConfigPath(ctx.cwd), settings.warnings);
 		if (project) applySection(project, "project", settings);
 	} else {
-		settings.warnings.push("pi-forge-subagents: project is not trusted; project subagents.json settings are ignored.");
+		settings.warnings.push("pi-forge-subagents: project is not trusted; project subagents.json and config.json.subagents settings are ignored.");
 	}
 
 	return settings;
@@ -71,7 +94,7 @@ export function resolveSubagentProfilePolicy(
 	profileId: string,
 	explicitBackend?: string,
 ): ResolvedSubagentProfilePolicy {
-	const profile = settings.profiles[profileId] ?? {};
+	const profile = profileSettingsFor(settings, profileId) ?? {};
 	const enabled = profile.enabled === true;
 	const backendId = explicitBackend ?? profile.backend ?? settings.backend ?? DEFAULT_SUBAGENT_BACKEND_ID;
 	const backendSource: ResolvedSubagentProfilePolicy["backend"]["source"] = explicitBackend
@@ -86,6 +109,21 @@ export function resolveSubagentProfilePolicy(
 		? "project"
 		: settings.timeoutSource;
 	return { enabled, backend: { id: backendId, source: backendSource }, timeout: { milliseconds: timeoutMs, source: timeoutSource } };
+}
+
+function profileSettingsFor(settings: ForgeSubagentSettings, profileId: string): ForgeSubagentProfileSettings | undefined {
+	// Prefer exact canonical keys, then support bare project IDs in project-scoped
+	// selectors. Bare IDs never imply global delegation authority.
+	if (Object.hasOwn(settings.profiles, profileId)) return settings.profiles[profileId];
+	const canonical = profileId.startsWith("project:") || profileId.startsWith("global:")
+		? profileId
+		: `project:${profileId}`;
+	if (Object.hasOwn(settings.profiles, canonical)) return settings.profiles[canonical];
+	if (profileId.startsWith("project:")) {
+		const bare = profileId.slice("project:".length);
+		if (Object.hasOwn(settings.profiles, bare)) return settings.profiles[bare];
+	}
+	return undefined;
 }
 
 function readConfigFile(path: string, warnings: string[]): Record<string, unknown> | undefined {
@@ -104,6 +142,18 @@ function readConfigFile(path: string, warnings: string[]): Record<string, unknow
 	return raw as Record<string, unknown>;
 }
 
+function readLegacySubagentsSection(path: string, warnings: string[]): Record<string, unknown> | undefined {
+	const raw = readConfigFile(path, warnings);
+	if (!raw) return undefined;
+	if (raw.subagents === undefined) return undefined;
+	if (!raw.subagents || typeof raw.subagents !== "object" || Array.isArray(raw.subagents)) {
+		warnings.push(`pi-forge-subagents: ${path} subagents must be a JSON object; ignored.`);
+		return undefined;
+	}
+	warnings.push(`pi-forge-subagents: ${path} uses legacy config.json.subagents as read-only fallback; prefer subagents.json.`);
+	return raw.subagents as Record<string, unknown>;
+}
+
 function applySection(raw: Record<string, unknown>, source: "project" | "global", settings: ForgeSubagentSettings): void {
 	if (typeof raw.backend === "string" && raw.backend.trim()) {
 		settings.backend = raw.backend.trim();
@@ -117,6 +167,12 @@ function applySection(raw: Record<string, unknown>, source: "project" | "global"
 	}
 	if (typeof raw.allowAgentInvocationWithoutApproval === "boolean") {
 		settings.allowAgentInvocationWithoutApproval = raw.allowAgentInvocationWithoutApproval;
+	}
+	if (typeof raw.summaryInToolDescription === "boolean") {
+		settings.summaryInToolDescription = raw.summaryInToolDescription;
+		settings.summaryInToolDescriptionSource = source;
+	} else if (raw.summaryInToolDescription !== undefined) {
+		settings.warnings.push(`pi-forge-subagents: ${source} summaryInToolDescription must be boolean; ignored.`);
 	}
 	if (raw.profiles && typeof raw.profiles === "object" && !Array.isArray(raw.profiles)) {
 		for (const [profileId, value] of Object.entries(raw.profiles as Record<string, unknown>)) {
