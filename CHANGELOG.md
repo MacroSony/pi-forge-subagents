@@ -19,3 +19,12 @@
   - Added parallel-approval serialization and unattended backend pinning.
   - Added `summaryInToolDescription` config support.
   - Added read-only legacy `config.json.subagents` fallback.
+- Lane 4a: the package now owns the 0.4 execution contract locally
+  (`src/contract/`, names unchanged): request, preflight, plan, response,
+  context budgeting, tool negotiation, and their validators. Portable leaves
+  import directly from `@zihanw/pi-subagent-runtime`; host-owned domain shapes
+  are structural mirror types; snapshot profile validation narrows to
+  structural checks plus content fingerprints (deep schema validation is
+  host-owned). Only host-port DTOs (`Forge*` wire types, `ForgeHostClient`,
+  wire validators) come from `@zihanw/pi-forge/subagent`. `npm pack` now
+  rebuilds via `prepack`.

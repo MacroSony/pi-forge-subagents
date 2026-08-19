@@ -61,6 +61,8 @@ export interface AgentProfile {
 	model: AgentProfileModelReference;
 	thinkingLevel: ThinkingLevel;
 	promptStack: string | null;
+	/** The host owns the schema; unknown fields pass through for forward compatibility. */
+	[extra: string]: unknown;
 }
 
 export type PromptResourcePolicy =
@@ -70,6 +72,8 @@ export type PromptResourcePolicy =
 export interface PromptStack {
 	id: string;
 	tools?: PromptResourcePolicy;
+	/** The host owns the schema; unknown fields pass through for forward compatibility. */
+	[extra: string]: unknown;
 }
 
 // ---------------------------------------------------------------------------
