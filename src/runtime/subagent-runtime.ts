@@ -74,13 +74,19 @@ export interface ForgeSubagentRuntime {
 
 interface ReportCapableBackend extends ExecutionBackend {
 	takeReport(preparedRunId: string): PiSubprocessRunReport | undefined;
-	dispose(): Promise<void>;
+	dispose?(): Promise<void>;
 }
 
 export interface ForgeSubagentRuntimeOptions {
 	backendId?: string;
 	subprocess?: Omit<PiSubprocessBackendOptions, "modelRegistry" | "cwd">;
 	rpc?: Omit<PiRpcBackendOptions, "modelRegistry" | "cwd">;
+	/** Extra backends registered alongside the built-in subprocess/RPC backends (mainly for tests). */
+	extraBackends?: ExecutionBackend[];
+	/** When false, do not construct the built-in subprocess/RPC backends (tests inject their own). */
+	builtInBackends?: boolean;
+	/** Tool catalog used to build the execution intent (defaults to the read-only subprocess catalog). */
+	intentToolCatalog?: import("@zihanw/pi-forge/subagent").BackendPreflightAccepted["toolCatalog"];
 }
 
 interface RuntimeGeneration {
@@ -115,23 +121,27 @@ export function createForgeSubagentRuntime(
 		if (generation && generation.modelRegistry === ctx.modelRegistry && generation.cwd === ctx.cwd) return generation;
 		if (generation) {
 			void generation.runtime.dispose();
-			for (const backend of generation.backends.values()) void backend.dispose();
+			for (const backend of generation.backends.values()) void backend.dispose?.();
 		}
 		const runtime = createExecutionRuntime();
-		const subprocess = new PiSubprocessBackend({
-			modelRegistry: ctx.modelRegistry,
-			cwd: ctx.cwd,
-			...options.subprocess,
-		});
-		const rpc = new PiRpcBackend({
-			modelRegistry: ctx.modelRegistry,
-			cwd: ctx.cwd,
-			...options.rpc,
-		});
-		const backends = new Map<string, ReportCapableBackend>([
-			[subprocess.descriptor.id, subprocess],
-			[rpc.descriptor.id, rpc],
-		]);
+		const backends = new Map<string, ReportCapableBackend>();
+		if (options.builtInBackends !== false) {
+			const subprocess = new PiSubprocessBackend({
+				modelRegistry: ctx.modelRegistry,
+				cwd: ctx.cwd,
+				...options.subprocess,
+			});
+			const rpc = new PiRpcBackend({
+				modelRegistry: ctx.modelRegistry,
+				cwd: ctx.cwd,
+				...options.rpc,
+			});
+			backends.set(subprocess.descriptor.id, subprocess);
+			backends.set(rpc.descriptor.id, rpc);
+		}
+		for (const extra of options.extraBackends ?? []) {
+			backends.set(extra.descriptor.id, extra as ReportCapableBackend);
+		}
 		for (const backend of backends.values()) runtime.registerBackend(backend);
 		generation = { runtime, backends, modelRegistry: ctx.modelRegistry, cwd: ctx.cwd };
 		return generation;
@@ -197,7 +207,7 @@ export function createForgeSubagentRuntime(
 		const backendId = run?.backendId ?? options.backendId ?? policy.backend.id;
 		const backend = current.backends.get(backendId);
 		if (!backend) return { ok: false, diagnostics: [error("host.backend", `Backend is not registered: ${backendId}`)] };
-		const intent = executionIntentFor(request, snapshot);
+		const intent = executionIntentFor(request, snapshot, options.intentToolCatalog ?? forgeToolCatalog());
 
 		let hostPreparation: SubagentPreparationOutput | undefined;
 		let handle: PreparedRun;
@@ -233,7 +243,12 @@ export function createForgeSubagentRuntime(
 				},
 			});
 		} catch (prepareError) {
-			diagnostics.push(error("host.preparation", prepareError instanceof Error ? prepareError.message : String(prepareError)));
+			const nested = (prepareError as { diagnostics?: unknown }).diagnostics;
+			if (Array.isArray(nested)) {
+				diagnostics.push(...(nested as SubagentDiagnostic[]));
+			} else {
+				diagnostics.push(error("host.preparation", prepareError instanceof Error ? prepareError.message : String(prepareError)));
+			}
 			return { ok: false, diagnostics };
 		}
 
@@ -314,7 +329,7 @@ export function createForgeSubagentRuntime(
 		reports.clear();
 		if (!generation) return;
 		await generation.runtime.dispose();
-		await Promise.all([...generation.backends.values()].map((backend) => backend.dispose()));
+		await Promise.all([...generation.backends.values()].map((backend) => backend.dispose?.()));
 		generation = undefined;
 	}
 
@@ -337,9 +352,13 @@ function toPreparationOutput(prepared: import("@zihanw/pi-forge/subagent").Forge
 	};
 }
 
-function executionIntentFor(request: AgentRequest, snapshot: AgentProfileSnapshot): ExecutionIntent {
+function executionIntentFor(
+	request: AgentRequest,
+	snapshot: AgentProfileSnapshot,
+	toolCatalog: import("@zihanw/pi-forge/subagent").BackendPreflightAccepted["toolCatalog"],
+): ExecutionIntent {
 	const negotiation = negotiateSubagentTools(
-		forgeToolCatalog(),
+		toolCatalog,
 		snapshot.promptStack?.tools,
 		request.access,
 	);
