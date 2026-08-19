@@ -28,3 +28,8 @@
   host-owned). Only host-port DTOs (`Forge*` wire types, `ForgeHostClient`,
   wire validators) come from `@zihanw/pi-forge/subagent`. `npm pack` now
   rebuilds via `prepack`.
+- Lane 4c: the package now has its own `check:packed` smoke — it packs both
+  packages, installs them into a temporary consumer, loads both packed
+  extension factories over a shared event bus, and runs discover →
+  listProfiles → resolveProfile → prepare → dispose → host-shutdown against a
+  fixture workspace, ending with rediscovery failure after disposal.

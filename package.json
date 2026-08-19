@@ -44,8 +44,9 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
-    "verify": "npm test && npm run typecheck",
-    "prepack": "npm run build"
+    "verify": "npm test && npm run typecheck && npm run check:packed",
+    "prepack": "npm run build",
+    "check:packed": "node scripts/check-packed-install.mjs"
   },
   "files": [
     "dist/",
