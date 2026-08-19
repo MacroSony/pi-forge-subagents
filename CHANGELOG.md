@@ -7,6 +7,8 @@
   `/subagent` host port; list profiles and prepare prompts through the port;
   observe host disposal.
 - Extension entry point registers `/subagent list | plan` surface.
+- Packed-install smoke verified together with the main package (`main + optional`).
+- Aligned prerelease version to 0.5.0-beta.1.
 - Full `forge_subagent` execution chain: own `subagents.json` config,
   `ForgeHostSession.resolveProfile`, backend preflight + sealing via
   `@zihanw/pi-subagent-runtime`, host compile through the host port, interactive
