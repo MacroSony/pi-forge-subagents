@@ -3,11 +3,13 @@ import type {
 	ForgePrepareRequest,
 	ForgePrepareResponse,
 	ForgeProfileSummary,
+	ForgeResolveProfileRequest,
 } from "@zihanw/pi-forge/subagent";
 import {
 	ForgeHostClient,
 	validateListProfilesResponse,
 	validatePrepareResponse,
+	validateResolveProfileResponse,
 	type ForgeHostConnection,
 } from "@zihanw/pi-forge/subagent";
 
@@ -87,6 +89,16 @@ export class ForgeHostSession {
 		const validated = validateListProfilesResponse(result.data);
 		if (!validated.ok) throw new Error(validated.error);
 		return (validated.data as { profiles: ForgeProfileSummary[] }).profiles;
+	}
+
+	async resolveProfile(selector: string): Promise<{ snapshot: unknown }> {
+		const connection = this.requireConnection();
+		const request: ForgeResolveProfileRequest = { profile: selector };
+		const result = await this.client.request(connection, "resolveProfile", request);
+		if (!result.ok) throw new Error(result.error);
+		const validated = validateResolveProfileResponse(result.data);
+		if (!validated.ok) throw new Error(validated.error);
+		return validated.data as { snapshot: unknown };
 	}
 
 	async prepare(request: ForgePrepareRequest): Promise<ForgePrepareResponse> {

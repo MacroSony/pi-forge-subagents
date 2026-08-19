@@ -1,40 +1,49 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ForgePrepareRequest } from "@zihanw/pi-forge/subagent";
 import { ForgeHostSession } from "./host/session.ts";
+import { createForgeSubagentRuntime } from "./runtime/subagent-runtime.ts";
+import { registerForgeSubagentTool } from "./tool/forge-subagent.ts";
 
 export { ForgeHostSession } from "./host/session.ts";
 export type { ForgeHostSessionOptions } from "./host/session.ts";
+export { createForgeSubagentRuntime } from "./runtime/subagent-runtime.ts";
+export type { ForgeSubagentPreparedRun, ForgeSubagentRuntime, ForgeSubagentPreparationResult } from "./runtime/subagent-runtime.ts";
+export { registerForgeSubagentTool } from "./tool/forge-subagent.ts";
+export type { ForgeSubagentToolDetails, ForgeSubagentApprovalReceipt } from "./tool/forge-subagent.ts";
+export { loadForgeSubagentSettings, resolveSubagentProfilePolicy } from "./config/subagents.ts";
+export type { ForgeSubagentSettings, ForgeSubagentProfileSettings, ResolvedSubagentProfilePolicy } from "./config/subagents.ts";
 
 export interface ForgeSubagentsExtensionContext {
 	session?: ForgeHostSession;
+	dispose(): void;
 }
 
 /**
  * Pi extension entry point for the optional subagent integration.
  *
- * It discovers the active pi-forge host through `pi.events` using the
- * versioned `/subagent` host port, then exposes profile listing and prompt
- * preparation as model-callable/command surface. All profile/stack/compile
- * ownership stays in the main pi-forge host; this package only consumes the
- * published port and owns execution/config.
+ * Discovers the active pi-forge host through `pi.events` using the versioned
+ * `/subagent` host port, registers the `forge_subagent` tool with interactive
+ * approval, and owns execution through @zihanw/pi-subagent-runtime. All
+ * profile/stack/compile ownership stays in the main pi-forge host.
  */
 export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtensionContext {
-	const context: ForgeSubagentsExtensionContext = {};
+	let session: ForgeHostSession | undefined;
+	const runtime = createForgeSubagentRuntime(() => session);
 
 	pi.on("session_start", async (_event: unknown) => {
-		context.session?.dispose();
-		context.session = await ForgeHostSession.connect(pi.events as never);
+		session?.dispose();
+		session = await ForgeHostSession.connect(pi.events as never);
 	});
 
 	pi.on("session_shutdown", async () => {
-		context.session?.dispose();
-		context.session = undefined;
+		session?.dispose();
+		session = undefined;
+		await runtime.dispose();
 	});
 
 	pi.registerCommand("subagent", {
 		description: "List Forge profiles and prepare delegated prompts through the active pi-forge host.",
 		handler: async (args: string, ctx) => {
-			const session = context.session;
 			if (!session) {
 				ctx.ui.notify("pi-forge-subagents: no Forge host session (start a session first).", "warning");
 				return;
@@ -65,5 +74,16 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 		},
 	});
 
-	return context;
+	registerForgeSubagentTool(pi, runtime, { sessionProvider: () => session });
+
+	return {
+		get session() {
+			return session;
+		},
+		dispose() {
+			session?.dispose();
+			session = undefined;
+			void runtime.dispose();
+		},
+	};
 }
