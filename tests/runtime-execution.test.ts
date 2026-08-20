@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ForgePrepareRequest, ForgePrepareResponse } from "@zihanw/pi-forge/subagent";
-import { negotiateSubagentTools, subagentPromptStackFingerprint, subagentSourceProfileFingerprint, type AgentProfileSnapshot } from "../src/contract/index.ts";
+import { negotiateSubagentTools, subagentPromptStackFingerprint, subagentSourceProfileFingerprint, type AgentProfileSnapshot, type SubagentDiagnostic } from "../src/contract/index.ts";
 import { DeterministicFakeBackend } from "@zihanw/pi-subagent-runtime/testing";
 import { createForgeSubagentRuntime, type ForgeSubagentRuntime } from "../src/runtime/subagent-runtime.ts";
 import type { ForgeHostSession } from "../src/host/session.ts";
@@ -29,7 +29,7 @@ const SNAPSHOT: AgentProfileSnapshot = {
 SNAPSHOT.profileFingerprint = subagentSourceProfileFingerprint(SNAPSHOT.profile);
 SNAPSHOT.promptStackFingerprint = subagentPromptStackFingerprint(SNAPSHOT.promptStack!);
 
-function fakeSession(): ForgeHostSession {
+function fakeSession(hostDiagnostics?: SubagentDiagnostic[]): ForgeHostSession {
 	const session = {
 		resolveProfile: async () => ({ snapshot: SNAPSHOT }),
 		prepare: async (request: ForgePrepareRequest) => {
@@ -46,7 +46,7 @@ function fakeSession(): ForgeHostSession {
 				messages: [{ role: "user", content: [{ type: "text", text: "Review the patch." }], protectedTask: true, source: "delegated-task" }],
 				effectiveToolIds: negotiation.effectiveToolIds,
 				effectiveToolNames: negotiation.effectiveToolNames,
-				diagnostics: negotiation.diagnostics,
+				diagnostics: hostDiagnostics ?? negotiation.diagnostics,
 				profileSnapshot: SNAPSHOT,
 				preparedAt: "2026-07-14T00:00:00.000Z",
 			};
@@ -106,5 +106,89 @@ test("runtime executes the full chain: preflight -> seal -> prepare -> execute",
 	} finally {
 		await runtime.dispose();
 		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("host preparation diagnostics are reported exactly once", async () => {
+	const hostDiagnostics: SubagentDiagnostic[] = [
+		{ level: "info", code: "host.prepare.note", message: "host note one" },
+		{ level: "warning", code: "host.prepare.warn", message: "host warning two" },
+	];
+	const fakeBackend = new DeterministicFakeBackend({ id: "fake-test-backend", fidelity: "backend-assisted" });
+	const runtime: ForgeSubagentRuntime = createForgeSubagentRuntime(() => fakeSession(hostDiagnostics), {
+		builtInBackends: false,
+		extraBackends: [fakeBackend as any],
+		intentToolCatalog: [{ id: "tool.read", name: "read", effects: ["filesystem-read"] }],
+	});
+	const ctx = fakeCtx();
+	const cwd = ctx.cwd as string;
+	mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+	writeFileSync(join(cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
+		profiles: { "project:worker": { enabled: true } },
+	}), "utf8");
+	try {
+		const preparation = await runtime.prepare("project:worker", "Review the patch.", ctx, {
+			backendId: "fake-test-backend",
+			timeoutMs: 60_000,
+		});
+		assert.equal(preparation.ok, true, preparation.ok ? undefined : preparation.diagnostics.map((d) => d.message).join("; "));
+		const reported = preparation.prepared.diagnostics;
+		for (const host of hostDiagnostics) {
+			const matches = reported.filter((d) => d.code === host.code && d.message === host.message);
+			assert.equal(matches.length, 1, `host diagnostic ${host.code}:${host.message} must appear exactly once (found ${matches.length})`);
+		}
+	} finally {
+		await runtime.dispose();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("generation replacement serializes disposal before preparing with the new generation", async () => {
+	const inner = new DeterministicFakeBackend({ id: "fake-test-backend", fidelity: "backend-assisted" });
+	let releaseDispose!: () => void;
+	const disposeGate = new Promise<void>((resolve) => { releaseDispose = resolve; });
+	const backend = {
+		descriptor: inner.descriptor,
+		preflight: (input: any) => inner.preflight(input),
+		prepare: (input: any, context: any) => inner.prepare(input, context),
+		start: (input: any, context: any) => inner.start(input, context),
+		discard: (preparation: any) => inner.discard(preparation),
+		dispose: () => disposeGate,
+	} as any;
+	const runtime: ForgeSubagentRuntime = createForgeSubagentRuntime(fakeSession, {
+		builtInBackends: false,
+		extraBackends: [backend],
+		intentToolCatalog: [{ id: "tool.read", name: "read", effects: ["filesystem-read"] }],
+	});
+	const ctxA = fakeCtx();
+	ctxA.cwd = "/tmp/gen-a";
+	const ctxB = fakeCtx();
+	ctxB.cwd = "/tmp/gen-b";
+	for (const ctx of [ctxA, ctxB]) {
+		mkdirSync(join(ctx.cwd, ".pi", "forge"), { recursive: true });
+		writeFileSync(join(ctx.cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
+			profiles: { "project:worker": { enabled: true } },
+		}), "utf8");
+	}
+	try {
+		const first = await runtime.prepare("project:worker", "Review the patch.", ctxA, { backendId: "fake-test-backend", timeoutMs: 60_000 });
+		assert.equal(first.ok, true, first.ok ? undefined : first.diagnostics.map((d) => d.message).join("; "));
+		assert.equal(inner.preflightCalls.length, 1);
+
+		// A different cwd forces a generation replacement; the replaced
+		// generation's disposal must gate the fresh generation's preflight.
+		const secondPromise = runtime.prepare("project:worker", "Review the patch.", ctxB, { backendId: "fake-test-backend", timeoutMs: 60_000 });
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.equal(inner.preflightCalls.length, 1, "fresh generation preflight must wait for replaced generation disposal");
+
+		releaseDispose();
+		const second = await secondPromise;
+		assert.equal(second.ok, true, second.ok ? undefined : second.diagnostics.map((d) => d.message).join("; "));
+		assert.equal(inner.preflightCalls.length, 2, "fresh generation preflight runs after replaced generation disposal settles");
+	} finally {
+		releaseDispose();
+		await runtime.dispose();
+		rmSync(ctxA.cwd as string, { recursive: true, force: true });
+		rmSync(ctxB.cwd as string, { recursive: true, force: true });
 	}
 });

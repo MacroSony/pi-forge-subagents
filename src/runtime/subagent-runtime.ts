@@ -114,16 +114,35 @@ export function createForgeSubagentRuntime(
 	options: ForgeSubagentRuntimeOptions = {},
 ): ForgeSubagentRuntime {
 	let generation: RuntimeGeneration | undefined;
+	// Disposal of replaced generations is serialized through this chain; callers
+	// that are about to use a fresh generation await it so teardown of the
+	// previous generation cannot race the new one. Errors are caught and surfaced
+	// (logged) so a failed disposal never wedges the chain or becomes an unhandled
+	// rejection.
+	let disposalChain: Promise<void> = Promise.resolve();
 	const prepared = new Map<string, PreparedRecord>();
 	const reports = new Map<string, { backend: ReportCapableBackend; preparedRunId: string }>();
 	const backendIds = ["pi-subprocess-readonly", "pi-rpc-readonly"];
 
+	async function disposeGeneration(target: RuntimeGeneration): Promise<void> {
+		await target.runtime.dispose();
+		await Promise.all([...target.backends.values()].map((backend) => backend.dispose?.()));
+	}
+
+	function surfaceDisposalError(label: string, disposeError: unknown): void {
+		// eslint-disable-next-line no-console
+		console.error(`[pi-forge-subagents] ${label}: ${disposeError instanceof Error ? disposeError.stack ?? disposeError.message : String(disposeError)}`);
+	}
+
+	function scheduleDisposal(target: RuntimeGeneration): void {
+		disposalChain = disposalChain
+			.then(() => disposeGeneration(target))
+			.catch((disposeError: unknown) => surfaceDisposalError("runtime generation disposal failed", disposeError));
+	}
+
 	function ensure(ctx: ExtensionContext): RuntimeGeneration {
 		if (generation && generation.modelRegistry === ctx.modelRegistry && generation.cwd === ctx.cwd) return generation;
-		if (generation) {
-			void generation.runtime.dispose();
-			for (const backend of generation.backends.values()) void backend.dispose?.();
-		}
+		if (generation) scheduleDisposal(generation);
 		const runtime = createExecutionRuntime();
 		const backends = new Map<string, ReportCapableBackend>();
 		if (options.builtInBackends !== false) {
@@ -205,6 +224,9 @@ export function createForgeSubagentRuntime(
 			remoteEgressConsent: true,
 		};
 		const current = ensure(ctx);
+		// A replaced generation must finish tearing down before we start preparing
+		// against the fresh generation.
+		await disposalChain;
 		const backendId = run?.backendId ?? options.backendId ?? policy.backend.id;
 		const backend = current.backends.get(backendId);
 		if (!backend) return { ok: false, diagnostics: [error("host.backend", `Backend is not registered: ${backendId}`)] };
@@ -260,7 +282,10 @@ export function createForgeSubagentRuntime(
 			diagnostics.push(error("host.preparation", "Host compilation did not complete."));
 			return { ok: false, diagnostics };
 		}
-		diagnostics.push(...hostPreparation.diagnostics, ...hostPreparation.toolNegotiation.diagnostics);
+		// Host preparation diagnostics are collected exactly once below, inside the
+		// plan's own diagnostics (createAgentExecutionPlan spreads
+		// preparation.diagnostics; toolNegotiation.diagnostics is intentionally left
+		// empty), so they must not be re-pushed here.
 		const planned = createAgentExecutionPlan({
 			runId: handle.id,
 			request,
@@ -291,6 +316,9 @@ export function createForgeSubagentRuntime(
 		const record = prepared.get(preparedRun.plan.runId);
 		if (!record) throw new Error("Subagent prepared run is unknown to this runtime generation.");
 		const current = ensure(ctx);
+		// Same serialization as prepare: never execute against a fresh generation
+		// while a replaced generation is still tearing down.
+		await disposalChain;
 		if (record.generation !== current) throw new Error("Subagent prepared run belongs to a previous runtime generation.");
 		prepared.delete(preparedRun.plan.runId);
 		const run = current.runtime.execute(record.handle);
@@ -328,10 +356,13 @@ export function createForgeSubagentRuntime(
 	async function dispose(): Promise<void> {
 		prepared.clear();
 		reports.clear();
-		if (!generation) return;
-		await generation.runtime.dispose();
-		await Promise.all([...generation.backends.values()].map((backend) => backend.dispose?.()));
+		const target = generation;
 		generation = undefined;
+		if (target) {
+			await disposeGeneration(target).catch((disposeError: unknown) => surfaceDisposalError("runtime disposal failed", disposeError));
+		}
+		// Drain any replaced generations still finishing teardown.
+		await disposalChain;
 	}
 
 	return { backendIds: () => [...backendIds], descriptors, prepare, discard, execute, takeReport, dispose };
@@ -347,7 +378,10 @@ function toPreparationOutput(prepared: ForgePrepareResponse): SubagentPreparatio
 			effectiveToolNames: prepared.effectiveToolNames,
 			stackSelectedToolNames: prepared.effectiveToolNames,
 			unmatchedAllowPatterns: [],
-			diagnostics: (prepared.diagnostics as SubagentDiagnostic[]),
+			// Host preparation diagnostics belong at the top level only. Sharing the
+			// same array here would double-count every entry when prepare() collects
+			// plan diagnostics below.
+			diagnostics: [],
 		},
 		diagnostics: (prepared.diagnostics as SubagentDiagnostic[]),
 	};
