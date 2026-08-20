@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Fix: host preparation diagnostics are reported exactly once.
+  `toPreparationOutput` no longer aliases the top-level `diagnostics` array onto
+  `toolNegotiation.diagnostics`, and `prepare()` no longer re-pushes them before
+  plan diagnostics are collected. Regression test asserts no duplicated
+  host-preparation diagnostics.
+- Fix: align dependency policy with the main `pi-forge` package —
+  `@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, and
+  `@earendil-works/pi-tui` are now optional `peerDependencies` (`*`) instead of
+  hard `dependencies`, kept as `devDependencies` for local development so the
+  extension no longer installs private duplicate copies of Pi packages.
+- Fix: serialize disposal of replaced runtime generations in
+  `createForgeSubagentRuntime` — teardown of a replaced generation is awaited
+  before `prepare`/`execute` use the fresh generation, and disposal errors are
+  caught and surfaced instead of becoming unhandled rejections. Regression test
+  proves a fresh generation's preflight waits for the replaced generation's
+  disposal.
+
 ## 0.5.0 - 2026-08-20
 
 - Initial optional-package scaffold for Lane 3 of pi-forge 0.5.0.
