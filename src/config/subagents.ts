@@ -23,6 +23,8 @@ export interface ForgeSubagentSettings {
 	summaryInToolDescription?: boolean;
 	summaryInToolDescriptionSource?: "project" | "global";
 	profiles: Record<string, ForgeSubagentProfileSettings>;
+	/** File provenance per profile entry key: which config file last defined it. */
+	profilesSource: Record<string, "project" | "global">;
 	warnings: string[];
 }
 
@@ -62,6 +64,7 @@ export function loadForgeSubagentSettings(ctx: ExtensionContext): ForgeSubagentS
 		timeoutSource: "built-in",
 		summaryInToolDescription: false,
 		profiles: Object.create(null) as Record<string, ForgeSubagentProfileSettings>,
+		profilesSource: Object.create(null) as Record<string, "project" | "global">,
 		warnings: [],
 	};
 
@@ -95,35 +98,53 @@ export function resolveSubagentProfilePolicy(
 	explicitBackend?: string,
 ): ResolvedSubagentProfilePolicy {
 	const profile = profileSettingsFor(settings, profileId) ?? {};
+	const profileSource = resolveProfileSource(settings, profileId);
 	const enabled = profile.enabled === true;
 	const backendId = explicitBackend ?? profile.backend ?? settings.backend ?? DEFAULT_SUBAGENT_BACKEND_ID;
 	const backendSource: ResolvedSubagentProfilePolicy["backend"]["source"] = explicitBackend
 		? "explicit"
 		: profile.backend !== undefined && profile.backend !== null
-			? "project"
+			? profileSource
 			: settings.backend !== undefined
 				? settings.backendSource ?? "global"
 				: "built-in";
 	const timeoutMs = profile.timeoutMs ?? settings.timeoutMs;
 	const timeoutSource: ResolvedSubagentProfilePolicy["timeout"]["source"] = profile.timeoutMs !== undefined && profile.timeoutMs !== null
-		? "project"
+		? profileSource
 		: settings.timeoutSource;
 	return { enabled, backend: { id: backendId, source: backendSource }, timeout: { milliseconds: timeoutMs, source: timeoutSource } };
 }
 
-function profileSettingsFor(settings: ForgeSubagentSettings, profileId: string): ForgeSubagentProfileSettings | undefined {
+function profileSettingsKey(settings: ForgeSubagentSettings, profileId: string): string | undefined {
 	// Prefer exact canonical keys, then support bare project IDs in project-scoped
 	// selectors. Bare IDs never imply global delegation authority.
-	if (Object.hasOwn(settings.profiles, profileId)) return settings.profiles[profileId];
+	if (Object.hasOwn(settings.profiles, profileId)) return profileId;
 	const canonical = profileId.startsWith("project:") || profileId.startsWith("global:")
 		? profileId
 		: `project:${profileId}`;
-	if (Object.hasOwn(settings.profiles, canonical)) return settings.profiles[canonical];
+	if (Object.hasOwn(settings.profiles, canonical)) return canonical;
 	if (profileId.startsWith("project:")) {
 		const bare = profileId.slice("project:".length);
-		if (Object.hasOwn(settings.profiles, bare)) return settings.profiles[bare];
+		if (Object.hasOwn(settings.profiles, bare)) return bare;
 	}
 	return undefined;
+}
+
+function profileSettingsFor(settings: ForgeSubagentSettings, profileId: string): ForgeSubagentProfileSettings | undefined {
+	const key = profileSettingsKey(settings, profileId);
+	return key === undefined ? undefined : settings.profiles[key];
+}
+
+/**
+ * File provenance for the effective profile entry: which config file last
+ * defined it. Mirrors profileSettingsKey so a bare global-defined key still
+ * reports the global file as its source. Defaults to global for defensive
+ * fallback (the base layer; project overrides it when defined).
+ */
+function resolveProfileSource(settings: ForgeSubagentSettings, profileId: string): "project" | "global" {
+	const key = profileSettingsKey(settings, profileId);
+	if (key !== undefined && Object.hasOwn(settings.profilesSource, key)) return settings.profilesSource[key];
+	return "global";
 }
 
 function readConfigFile(path: string, warnings: string[]): Record<string, unknown> | undefined {
@@ -188,6 +209,7 @@ function applySection(raw: Record<string, unknown>, source: "project" | "global"
 			if (record.timeoutMs === null) current.timeoutMs = null;
 			else if (isValidSubagentTimeoutMs(record.timeoutMs)) current.timeoutMs = record.timeoutMs;
 			settings.profiles[profileId] = current;
+			settings.profilesSource[profileId] = source;
 		}
 	}
 }

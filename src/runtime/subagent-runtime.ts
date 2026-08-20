@@ -199,6 +199,9 @@ export function createForgeSubagentRuntime(
 		let snapshot: AgentProfileSnapshot;
 		try {
 			const resolved = await session.resolveProfile(canonicalProfileId);
+			// Wire envelope is validated at the port; the snapshot profile/stack are
+			// host-owned schemas that this package mirrors structurally, so the
+			// projection onto the local contract type stays an explicit boundary cast.
 			snapshot = resolved.snapshot as AgentProfileSnapshot;
 		} catch (resolveError) {
 			diagnostics.push(error("host.profile-missing", resolveError instanceof Error ? resolveError.message : String(resolveError)));
@@ -261,7 +264,7 @@ export function createForgeSubagentRuntime(
 					hostPreparation = toPreparationOutput(preparedResponse);
 					return {
 						systemPrompt: preparedResponse.systemPrompt,
-						messages: (preparedResponse.messages as SubagentPreparedMessage[]).map(portableMessage),
+						messages: preparedResponse.messages.map(portableMessage),
 					};
 				},
 			});
@@ -371,7 +374,7 @@ export function createForgeSubagentRuntime(
 function toPreparationOutput(prepared: ForgePrepareResponse): SubagentPreparationOutput {
 	return {
 		systemPrompt: prepared.systemPrompt,
-		messages: prepared.messages as SubagentPreparedMessage[],
+		messages: prepared.messages,
 		contextBudget: undefined,
 		toolNegotiation: {
 			effectiveToolIds: prepared.effectiveToolIds,
@@ -383,7 +386,7 @@ function toPreparationOutput(prepared: ForgePrepareResponse): SubagentPreparatio
 			// plan diagnostics below.
 			diagnostics: [],
 		},
-		diagnostics: (prepared.diagnostics as SubagentDiagnostic[]),
+		diagnostics: prepared.diagnostics,
 	};
 }
 

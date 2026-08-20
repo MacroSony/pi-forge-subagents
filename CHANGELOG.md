@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Fix: profile-level `backend`/`timeoutMs` provenance is reported correctly.
+  `loadForgeSubagentSettings` now tracks which config file each `profiles`
+  entry came from (`profilesSource`), and `resolveSubagentProfilePolicy`
+  reports that file's scope instead of hardcoding `"project"` — a
+  global-configured `global:<id>` profile no longer masquerades as
+  project-sourced. Regression test covers per-file provenance.
+- Changed: consume the strengthened `/subagent` host-port DTO types from
+  `@zihanw/pi-forge` — `ForgeHostSession.resolveProfile` returns the typed
+  `ForgeResolveProfileResponse`, and the runtime preparation path drops its
+  `unknown` casts for messages/diagnostics. The only remaining cast is the
+  documented snapshot projection at the host boundary.
 - Fix: host preparation diagnostics are reported exactly once.
   `toPreparationOutput` no longer aliases the top-level `diagnostics` array onto
   `toolNegotiation.diagnostics`, and `prepare()` no longer re-pushes them before

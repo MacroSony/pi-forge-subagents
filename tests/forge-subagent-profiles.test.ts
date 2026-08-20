@@ -11,6 +11,7 @@ function settings(): ForgeSubagentSettings {
 		timeoutSource: "built-in",
 		summaryInToolDescription: false,
 		profiles: { "project:worker": { enabled: true } },
+		profilesSource: { "project:worker": "project" },
 		warnings: [],
 	};
 }
