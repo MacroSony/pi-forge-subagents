@@ -25,6 +25,7 @@ import {
 	createAgentExecutionPlan,
 	hasSubagentErrors,
 	negotiateSubagentTools,
+	validateAgentProfileSnapshot,
 	type AgentExecutionPlan,
 	type AgentProfileSnapshot,
 	type AgentRequest,
@@ -199,9 +200,15 @@ export function createForgeSubagentRuntime(
 		let snapshot: AgentProfileSnapshot;
 		try {
 			const resolved = await session.resolveProfile(canonicalProfileId);
-			// Wire envelope is validated at the port; the snapshot profile/stack are
-			// host-owned schemas that this package mirrors structurally, so the
-			// projection onto the local contract type stays an explicit boundary cast.
+			// Deep structural validation at the boundary, before the snapshot feeds
+			// the execution intent or backend preflight. The host port only
+			// guarantees the wire envelope; the full local contract check runs here
+			// (and again inside plan creation as an integrity net).
+			const snapshotDiagnostics = validateAgentProfileSnapshot(resolved.snapshot);
+			if (hasSubagentErrors(snapshotDiagnostics)) {
+				diagnostics.push(...snapshotDiagnostics);
+				return { ok: false, diagnostics };
+			}
 			snapshot = resolved.snapshot as AgentProfileSnapshot;
 		} catch (resolveError) {
 			diagnostics.push(error("host.profile-missing", resolveError instanceof Error ? resolveError.message : String(resolveError)));

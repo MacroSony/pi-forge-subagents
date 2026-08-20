@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Fix: the host profile snapshot is now structurally validated immediately
+  after `resolveProfile()`, before the execution intent or backend preflight
+  are built (0.5.x review A3). `prepare` fails fast with `snapshot.*`
+  diagnostics on a malformed snapshot; regression test asserts backends are
+  never touched in that case. Plan creation keeps its own validation as an
+  integrity net.
+- Changed: dev/test Pi SDK pins aligned with the main package at `0.84.2`
+  (0.5.x review A4); `pi-coding-agent` no longer lags at `0.83.0`.
 - Fix: profile-level `backend`/`timeoutMs` provenance is reported correctly.
   `loadForgeSubagentSettings` now tracks which config file each `profiles`
   entry came from (`profilesSource`), and `resolveSubagentProfilePolicy`

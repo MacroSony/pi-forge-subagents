@@ -29,9 +29,9 @@ const SNAPSHOT: AgentProfileSnapshot = {
 SNAPSHOT.profileFingerprint = subagentSourceProfileFingerprint(SNAPSHOT.profile);
 SNAPSHOT.promptStackFingerprint = subagentPromptStackFingerprint(SNAPSHOT.promptStack!);
 
-function fakeSession(hostDiagnostics?: SubagentDiagnostic[]): ForgeHostSession {
+function fakeSession(hostDiagnostics?: SubagentDiagnostic[], snapshotOverride?: unknown): ForgeHostSession {
 	const session = {
-		resolveProfile: async () => ({ snapshot: SNAPSHOT }),
+		resolveProfile: async () => ({ snapshot: snapshotOverride ?? SNAPSHOT }),
 		prepare: async (request: ForgePrepareRequest) => {
 			const negotiation = negotiateSubagentTools(
 				request.backend.toolCatalog as never,
@@ -190,5 +190,43 @@ test("generation replacement serializes disposal before preparing with the new g
 		await runtime.dispose();
 		rmSync(ctxA.cwd as string, { recursive: true, force: true });
 		rmSync(ctxB.cwd as string, { recursive: true, force: true });
+	}
+});
+
+test("prepare fails fast on a malformed host snapshot before touching backends", async () => {
+	const malformed = { schemaVersion: 1, profileId: "not a selector", profile: { model: "nope" } };
+	const inner = new DeterministicFakeBackend({ id: "fake-test-backend", fidelity: "backend-assisted" });
+	let preflightCalls = 0;
+	const backend = {
+		descriptor: inner.descriptor,
+		preflight: (input: any) => { preflightCalls += 1; return inner.preflight(input); },
+		prepare: (input: any, context: any) => inner.prepare(input, context),
+		start: (input: any, context: any) => inner.start(input, context),
+		discard: (preparation: any) => inner.discard(preparation),
+	};
+	const runtime: ForgeSubagentRuntime = createForgeSubagentRuntime(() => fakeSession(undefined, malformed), {
+		builtInBackends: false,
+		extraBackends: [backend as any],
+	});
+	const ctx = fakeCtx();
+	const cwd = ctx.cwd as string;
+	mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+	writeFileSync(join(cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
+		profiles: { "project:worker": { enabled: true } },
+	}), "utf8");
+	try {
+		const preparation = await runtime.prepare("project:worker", "Review the patch.", ctx, {
+			backendId: "fake-test-backend",
+			timeoutMs: 60_000,
+		});
+		assert.equal(preparation.ok, false);
+		if (!preparation.ok) {
+			assert.ok(preparation.diagnostics.some((d) => d.code?.startsWith("snapshot.")),
+				`expected snapshot.* diagnostics, got: ${preparation.diagnostics.map((d) => d.code).join(", ")}`);
+		}
+		assert.equal(preflightCalls, 0, "backend preflight must not run for an invalid snapshot");
+	} finally {
+		await runtime.dispose();
+		rmSync(cwd, { recursive: true, force: true });
 	}
 });
