@@ -40,7 +40,7 @@ function fakeSession(hostDiagnostics?: SubagentDiagnostic[], snapshotOverride?: 
 			);
 			const response: ForgePrepareResponse = {
 				profileId: "project:worker",
-				model: { provider: "test-provider", id: "model-x" },
+				model: request.backend.model,
 				thinkingLevel: "high",
 				systemPrompt: "You are a focused reviewer.",
 				messages: [{ role: "user", content: [{ type: "text", text: "Review the patch." }], protectedTask: true, source: "delegated-task" }],
@@ -102,6 +102,36 @@ test("runtime executes the full chain: preflight -> seal -> prepare -> execute",
 		if (response.status === "completed") {
 			assert.equal(typeof response.output?.text, "string");
 			assert.equal(response.executionFingerprint, prepared.plan.executionFingerprint);
+		}
+	} finally {
+		await runtime.dispose();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("runtime carries a per-run model override into the sealed plan", async () => {
+	const fakeBackend = new DeterministicFakeBackend({ id: "fake-test-backend", fidelity: "backend-assisted" });
+	const runtime: ForgeSubagentRuntime = createForgeSubagentRuntime(fakeSession, {
+		builtInBackends: false,
+		extraBackends: [fakeBackend as any],
+		intentToolCatalog: [{ id: "tool.read", name: "read", effects: ["filesystem-read"] }],
+	});
+	const ctx = fakeCtx();
+	const cwd = ctx.cwd as string;
+	mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+	writeFileSync(join(cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
+		profiles: { "project:worker": { enabled: true } },
+	}), "utf8");
+	try {
+		const preparation = await runtime.prepare("project:worker", "Review the patch.", ctx, {
+			backendId: "fake-test-backend",
+			timeoutMs: 60_000,
+			model: { provider: "override-provider", id: "override-model" },
+		});
+		assert.equal(preparation.ok, true, preparation.ok ? undefined : preparation.diagnostics.map((d) => d.message).join("; "));
+		if (preparation.ok) {
+			assert.equal(preparation.prepared.plan.model.provider, "override-provider");
+			assert.equal(preparation.prepared.plan.model.id, "override-model");
 		}
 	} finally {
 		await runtime.dispose();

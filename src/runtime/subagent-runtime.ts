@@ -64,10 +64,16 @@ export interface SubagentBackendExecutionUpdate {
 	details?: unknown;
 }
 
+export interface ForgeSubagentRuntimePrepareOptions {
+	backendId?: string;
+	timeoutMs?: number;
+	model?: { provider: string; id: string };
+}
+
 export interface ForgeSubagentRuntime {
 	backendIds(): string[];
 	descriptors(ctx: ExtensionContext): SubagentBackendDescriptor[];
-	prepare(profileId: string, task: string, ctx: ExtensionContext, run?: { backendId?: string; timeoutMs?: number }): Promise<ForgeSubagentPreparationResult>;
+	prepare(profileId: string, task: string, ctx: ExtensionContext, run?: ForgeSubagentRuntimePrepareOptions): Promise<ForgeSubagentPreparationResult>;
 	discard(prepared: ForgeSubagentPreparedRun): Promise<void>;
 	execute(prepared: ForgeSubagentPreparedRun, ctx: ExtensionContext, signal?: AbortSignal, onUpdate?: (update: SubagentBackendExecutionUpdate) => void): Promise<AgentResponse>;
 	takeReport?(runId: string): PiSubprocessRunReport | undefined;
@@ -172,7 +178,7 @@ export function createForgeSubagentRuntime(
 		return ensure(ctx).runtime.listBackends().map(descriptorForHost);
 	}
 
-	async function prepare(profileId: string, task: string, ctx: ExtensionContext, run?: { backendId?: string; timeoutMs?: number }): Promise<ForgeSubagentPreparationResult> {
+	async function prepare(profileId: string, task: string, ctx: ExtensionContext, run?: ForgeSubagentRuntimePrepareOptions): Promise<ForgeSubagentPreparationResult> {
 		const diagnostics: SubagentDiagnostic[] = [];
 		if (!ctx.isProjectTrusted()) {
 			return { ok: false, diagnostics: [error("host.trust", "Project is not trusted; subagent profiles remain disabled.")] };
@@ -240,7 +246,7 @@ export function createForgeSubagentRuntime(
 		const backendId = run?.backendId ?? options.backendId ?? policy.backend.id;
 		const backend = current.backends.get(backendId);
 		if (!backend) return { ok: false, diagnostics: [error("host.backend", `Backend is not registered: ${backendId}`)] };
-		const intent = executionIntentFor(request, snapshot, options.intentToolCatalog ?? forgeToolCatalog());
+		const intent = executionIntentFor(request, snapshot, options.intentToolCatalog ?? forgeToolCatalog(), run?.model);
 
 		let hostPreparation: SubagentPreparationOutput | undefined;
 		let handle: PreparedRun;
@@ -303,6 +309,7 @@ export function createForgeSubagentRuntime(
 			preflight: preflightForHost(sealed.preflight),
 			preparation: hostPreparation,
 			runtime: sealed.promptRuntime,
+			...(run?.model ? { modelOverride: run.model } : {}),
 			conversationFingerprint: sealed.conversationFingerprint,
 			executionFingerprint: sealed.executionFingerprint,
 		});
@@ -401,6 +408,7 @@ function executionIntentFor(
 	request: AgentRequest,
 	snapshot: AgentProfileSnapshot,
 	toolCatalog: BackendPreflightAccepted["toolCatalog"],
+	modelOverride?: { provider: string; id: string },
 ): ExecutionIntent {
 	const negotiation = negotiateSubagentTools(
 		toolCatalog,
@@ -408,7 +416,7 @@ function executionIntentFor(
 		request.access,
 	);
 	return {
-		model: structuredClone(snapshot.profile.model),
+		model: structuredClone(modelOverride ?? snapshot.profile.model),
 		thinkingLevel: snapshot.profile.thinkingLevel,
 		requestedTools: negotiation.effectiveToolNames,
 		access: {

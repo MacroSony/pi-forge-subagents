@@ -13,6 +13,8 @@ export function createAgentExecutionPlan(input: {
 	preflight: BackendPreflightAccepted;
 	preparation: SubagentPreparationOutput;
 	runtime: SubagentPreparationRuntime;
+	/** Optional per-run model override. Defaults to the profile model when omitted. */
+	modelOverride?: { provider: string; id: string };
 	/** Runtime-issued fingerprint of the sealed conversation. */
 	conversationFingerprint: SubagentFingerprint;
 	/** Runtime-issued fingerprint binding the sealed conversation to the backend execution. */
@@ -21,7 +23,7 @@ export function createAgentExecutionPlan(input: {
 	const diagnostics = [
 		...validateAgentRequest(input.request),
 		...validateAgentProfileSnapshot(input.snapshot),
-		...validateBackendPreflight(input.preflight, input.request, input.snapshot),
+		...validateBackendPreflight(input.preflight, input.request, input.snapshot, input.modelOverride),
 		...input.preparation.diagnostics,
 		...input.preparation.toolNegotiation.diagnostics,
 	];
@@ -99,6 +101,7 @@ export function validateAgentExecutionPlan(plan: unknown, request?: AgentRequest
 		plan.preflight,
 		request,
 		isRecord(plan.profile) ? plan.profile as unknown as AgentProfileSnapshot : undefined,
+		isRecord(plan.model) ? { provider: String(plan.model.provider), id: String(plan.model.id) } : undefined,
 	).map((diagnostic) => ({ ...diagnostic, path: diagnostic.path ? `preflight.${diagnostic.path}` : "preflight" })));
 	diagnostics.push(...validateAgentProfileSnapshot(plan.profile).map((diagnostic) => ({ ...diagnostic, path: diagnostic.path ? `profile.${diagnostic.path}` : "profile" })));
 	validateModelReference(plan.model, "model", diagnostics);

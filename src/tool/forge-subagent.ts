@@ -1,5 +1,6 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AgentResponse, SubagentDiagnostic } from "../contract/index.ts";
 import type { ForgeSubagentPreparedRun, ForgeSubagentRuntime, SubagentBackendExecutionUpdate } from "../runtime/subagent-runtime.ts";
@@ -10,12 +11,30 @@ const APPROVE = "Approve and run";
 const VIEW_FULL_PROMPT = "View full prompt";
 const REJECT = "Reject";
 const MAX_PROGRESS_ITEMS = 100;
+const MAX_RENDER_TASK_CHARS = 100;
+const MAX_RENDER_OUTPUT_LINES = 8;
+const MAX_RENDER_OUTPUT_CHARS = 2_000;
+const MAX_RENDER_PROGRESS_LINES = 8;
 
 const ForgeSubagentParameters = Type.Object({
 	profileId: Type.String({ minLength: 1, description: "ID of a Pi Forge agent profile enabled for subagent delegation." }),
 	task: Type.String({ minLength: 1, description: "The focused task to delegate to the subagent." }),
 	backend: Type.Optional(Type.String({ minLength: 1, description: "Backend ID to execute through (interactive runs only)." })),
+	model: Type.Optional(Type.String({ minLength: 1, description: "Model provider/id to execute through (interactive runs only)." })),
 });
+
+export type ForgeSubagentModelOverride = { provider: string; id: string };
+
+export function parseForgeSubagentModel(value: string): { ok: true; model: ForgeSubagentModelOverride } | { ok: false; error: string } {
+	const trimmed = value.trim();
+	if (!trimmed) return { ok: false, error: "model must be a non-empty provider/id string." };
+	const separator = trimmed.indexOf("/");
+	if (separator <= 0) return { ok: false, error: "model must use provider/id format." };
+	const provider = trimmed.slice(0, separator).trim();
+	const id = trimmed.slice(separator + 1).trim();
+	if (!provider || !id) return { ok: false, error: "model must use provider/id format with non-empty provider and id." };
+	return { ok: true, model: { provider, id } };
+}
 
 export interface ForgeSubagentApprovalReceipt {
 	required: boolean;
@@ -54,9 +73,8 @@ function toolContent(text: string): AgentToolResult<ForgeSubagentToolDetails>["c
 }
 
 function textContent(result: AgentToolResult<unknown>): string {
-	const part = Array.isArray(result.content) ? result.content[0] : undefined;
-	if (part && part.type === "text") return part.text;
-	return "";
+	if (!Array.isArray(result.content)) return "";
+	return result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
 }
 
 function renderDiagnostics(diagnostics: readonly SubagentDiagnostic[]): string {
@@ -64,13 +82,13 @@ function renderDiagnostics(diagnostics: readonly SubagentDiagnostic[]): string {
 	return diagnostics.map((diagnostic) => `${diagnostic.level.toUpperCase()}: ${diagnostic.message}`).join("\n");
 }
 
-function renderApprovalSummary(prepared: ForgeSubagentPreparedRun, task: string): string {
+export function renderApprovalSummary(prepared: ForgeSubagentPreparedRun, task: string): string {
 	const plan = prepared.plan;
 	const lines = [
 		`Subagent approval: ${plan.profile.profileId}`,
 		`Task: ${task}`,
 		`Backend: ${plan.backendId}`,
-		`Model: ${plan.profile.profile.model.provider}/${plan.profile.profile.model.id}`,
+		`Model: ${plan.model.provider}/${plan.model.id}`,
 		`Thinking: ${plan.profile.profile.thinkingLevel}`,
 		`Prompt stack: ${plan.profile.promptStackId ?? "(none)"}`,
 		`System prompt chars: ${plan.systemPrompt.length}`,
@@ -155,6 +173,18 @@ export function registerForgeSubagentTool(
 					progress: [],
 				};
 
+				let modelOverride: ForgeSubagentModelOverride | undefined;
+				if (params.model !== undefined) {
+					const parsedModel = parseForgeSubagentModel(params.model);
+					if (!parsedModel.ok) {
+						return {
+							content: toolContent(`Invalid model override: ${parsedModel.error}`),
+							details: { ...baseDetails, status: "failed" },
+						};
+					}
+					modelOverride = parsedModel.model;
+				}
+
 				const session = options.sessionProvider();
 				if (!session) {
 					return { content: toolContent("pi-forge-subagents: no Forge host session (start a session first)."), details: { ...baseDetails, status: "failed" } };
@@ -164,6 +194,16 @@ export function registerForgeSubagentTool(
 					return {
 						content: toolContent(`Pi Forge agent profile "${params.profileId}" is not enabled for subagent delegation.`),
 						details: { ...baseDetails, status: "failed" },
+					};
+				}
+				if (!approvalRequired && modelOverride) {
+					return {
+						content: toolContent(`Subagent invocation was not run: unattended invocation is pinned to the profile/configured model. To use "${params.model}", run interactively or change the trusted subagent configuration.`),
+						details: {
+							...baseDetails,
+							status: "failed",
+							approval: { required: false, approved: false, viewedFullPrompt: false, source: "trusted-project-config" },
+						},
 					};
 				}
 				if (!approvalRequired && params.backend && params.backend !== policy.backend.id) {
@@ -195,6 +235,7 @@ export function registerForgeSubagentTool(
 					const preparation = await runtime.prepare(params.profileId, params.task, ctx, {
 						backendId: policy.backend.id,
 						timeoutMs: policy.timeout.milliseconds,
+						...(modelOverride ? { model: modelOverride } : {}),
 					});
 					if (!preparation.ok) {
 						const diagnostics = [...configDiagnostics, ...preparation.diagnostics];
@@ -263,6 +304,22 @@ export function registerForgeSubagentTool(
 					return { content: toolContent(`Subagent invocation failed: ${message}`), details: { ...baseDetails, status: "failed" } };
 				}
 			},
+
+			renderCall(args, theme) {
+				const task = truncate(args.task.replace(/\s+/g, " ").trim(), MAX_RENDER_TASK_CHARS);
+				return new Text(
+					`${theme.fg("toolTitle", theme.bold("forge subagent "))}${theme.fg("accent", args.profileId)}\n${theme.fg("dim", task)}`,
+					0,
+					0,
+				);
+			},
+
+			renderResult(result, { expanded, isPartial }, theme) {
+				const details = result.details;
+				if (!details) return new Text(textContent(result) || "(no subagent result)", 0, 0);
+				if (!expanded) return renderCollapsedResult(result, details, isPartial, theme);
+				return renderExpandedResult(result, details, theme);
+			},
 		});
 	}
 
@@ -296,7 +353,94 @@ function forgeSubagentToolDescription(embedded?: string): string {
 		"Runs require human approval after exact preparation unless the trusted project explicitly enables unattended agent invocation.",
 		"The child receives only approved read tools, but runs with the invoking user's OS permissions; read-only is not a sandbox.",
 		"The optional backend parameter selects the execution backend for interactively approved runs; unattended invocation always uses the configured default backend.",
+		"The optional model parameter selects the execution model (provider/id) for interactively approved runs; unattended invocation is pinned to the profile/configured model.",
 		"Use the final report as evidence and do not repeatedly request the same rejected delegation.",
 	].join(" ");
 	return embedded ? `${lines}\n\n${embedded}` : lines;
+}
+
+function renderCollapsedResult(
+	result: AgentToolResult<ForgeSubagentToolDetails>,
+	details: ForgeSubagentToolDetails,
+	isPartial: boolean,
+	theme: Theme,
+) {
+	const icon = details.status === "completed"
+		? theme.fg("success", "✓")
+		: details.status === "failed"
+			? theme.fg("error", "✗")
+			: details.status === "cancelled" || details.status === "timed-out"
+				? theme.fg("warning", "○")
+				: theme.fg("accent", "●");
+	const lines = [`${icon} ${theme.fg("toolTitle", theme.bold(details.profileId))} ${theme.fg("muted", `[${details.status}${isPartial ? ", live" : ""}]`)}`];
+	if (details.response?.model) {
+		lines.push(theme.fg("dim", `${details.response.model.provider}/${details.response.model.id} · ${details.response.durationMs}ms`));
+	} else if (details.progress.length > 0) {
+		const last = details.progress.at(-1);
+		if (last) lines.push(theme.fg("dim", last.message));
+	}
+	const output = textContent(result);
+	if (output) lines.push(theme.fg(details.status === "failed" ? "error" : "toolOutput", truncateLines(output, MAX_RENDER_OUTPUT_LINES, MAX_RENDER_OUTPUT_CHARS)));
+	if (details.response?.usage) lines.push(theme.fg("dim", usageText(details.response.usage)));
+	lines.push(theme.fg("muted", `Approval: ${approvalText(details.approval)}`));
+	return new Text(lines.join("\n"), 0, 0);
+}
+
+function renderExpandedResult(
+	result: AgentToolResult<ForgeSubagentToolDetails>,
+	details: ForgeSubagentToolDetails,
+	theme: Theme,
+) {
+	const container = new Container();
+	container.addChild(new Text(theme.fg("toolTitle", theme.bold(`${details.profileId} [${details.status}]`)), 0, 0));
+	container.addChild(new Text(theme.fg("muted", `Approval: ${approvalText(details.approval)}`), 0, 0));
+	if (details.response?.model) {
+		container.addChild(new Text(`${theme.fg("muted", "Model:")} ${details.response.model.provider}/${details.response.model.id} (${details.response.durationMs}ms)`, 0, 0));
+	}
+	container.addChild(new Spacer(1));
+	container.addChild(new Text(theme.fg("muted", "─── Delegated task ───"), 0, 0));
+	container.addChild(new Text(details.task, 0, 0));
+
+	if (details.progress.length > 0) {
+		container.addChild(new Spacer(1));
+		container.addChild(new Text(theme.fg("muted", "─── Live progress ───"), 0, 0));
+		for (const update of details.progress.slice(-MAX_RENDER_PROGRESS_LINES)) {
+			container.addChild(new Text(`${theme.fg("accent", update.phase)}: ${update.message}`, 0, 0));
+		}
+	}
+
+	const output = textContent(result) || details.response?.output?.text;
+	if (output) {
+		container.addChild(new Spacer(1));
+		container.addChild(new Text(theme.fg("muted", "─── Result ───"), 0, 0));
+		container.addChild(new Markdown(output, 0, 0, getMarkdownTheme()));
+	}
+	if (details.response?.usage) {
+		container.addChild(new Spacer(1));
+		container.addChild(new Text(theme.fg("dim", usageText(details.response.usage)), 0, 0));
+	}
+	return container;
+}
+
+function usageText(usage: NonNullable<AgentResponse["usage"]>): string {
+	const parts: string[] = [];
+	if (usage.tokens) {
+		parts.push(`${usage.tokens.input} input`, `${usage.tokens.output} output`, `${usage.tokens.total} total`);
+	}
+	if (usage.cost) parts.push(`$${usage.cost.amount.toFixed(4)} ${usage.cost.currency}`);
+	return parts.length > 0 ? parts.join(" · ") : "No usage reported";
+}
+
+function approvalText(approval: ForgeSubagentApprovalReceipt): string {
+	if (!approval.approved) return approval.required ? "not approved" : "not executed";
+	if (approval.source === "trusted-project-config") return "per-run approval bypassed by trusted-project config";
+	return `approved${approval.viewedFullPrompt ? " after full-prompt review" : ""}`;
+}
+
+function truncate(text: string, maxChars: number): string {
+	return text.length <= maxChars ? text : `${text.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function truncateLines(text: string, maxLines: number, maxChars: number): string {
+	return truncate(text.split("\n").slice(0, maxLines).join("\n"), maxChars);
 }
