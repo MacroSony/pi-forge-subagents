@@ -64,7 +64,7 @@ export function buildSubagentSettingsSchema(): UiContributionTabDescriptor["sche
 				type: "record",
 				keyLabel: "Profile ID",
 				keyPlaceholder: "project:worker",
-				description: "Per-profile enabled/backend/timeout overrides. Empty backend or timeout inherits the top-level value.",
+				description: "Use project:<id> or global:<id> to select the profile scope explicitly. Bare IDs authorize project profiles only. Empty backend or timeout inherits the top-level value.",
 				recordFields: [
 					{ key: "enabled", label: "Enabled", type: "boolean" },
 					{ key: "backend", label: "Backend", type: "string", placeholder: "pi-subprocess-readonly", maxLength: 128 },
@@ -147,6 +147,12 @@ export function writeSubagentSettingsValues(
 	const globalPath = globalSubagentsConfigPath();
 	const projectFile = readConfigFile(projectPath);
 	const globalFile = readConfigFile(globalPath);
+	if (!projectTrusted && isPlainRecord(patch.profiles)) {
+		const projectSelector = Object.keys(patch.profiles).find((profileId) => profileId.startsWith("project:"));
+		if (projectSelector) {
+			return { ok: false, errors: { [`profiles.${projectSelector}`]: "Project profile settings require a trusted project." } };
+		}
+	}
 
 	for (const key of TOP_LEVEL_FIELDS) {
 		if (key === "profiles" || !(key in patch)) continue;
@@ -165,6 +171,9 @@ export function writeSubagentSettingsValues(
 		for (const [profileId, row] of Object.entries(profilesPatch)) {
 			const target = targetFileForProfile(profileId, settings, projectFile, globalFile, projectTrusted);
 			const file = target === "project" ? projectFile : globalFile;
+			if (profileId.startsWith("project:") || profileId.startsWith("global:")) {
+				removeProfilePatch(target === "project" ? globalFile : projectFile, profileId);
+			}
 			applyProfilePatch(file, profileId, row);
 		}
 	}
@@ -174,6 +183,12 @@ export function writeSubagentSettingsValues(
 
 	const updated = loadForgeSubagentSettings(ctx);
 	return { ok: true, values: settingsToContributionValues(updated) };
+}
+
+function removeProfilePatch(file: Record<string, unknown>, profileId: string): void {
+	if (!isPlainRecord(file.profiles)) return;
+	delete file.profiles[profileId];
+	if (Object.keys(file.profiles).length === 0) delete file.profiles;
 }
 
 function validateSettingsPatch(patch: Record<string, unknown>): Record<string, string> {
@@ -262,6 +277,8 @@ function targetFileForProfile(
 	globalFile: Record<string, unknown>,
 	projectTrusted: boolean,
 ): "project" | "global" {
+	if (profileId.startsWith("global:")) return "global";
+	if (profileId.startsWith("project:")) return "project";
 	const source = settings.profilesSource[profileId];
 	if (source === "project") return "project";
 	if (source === "global") return "global";

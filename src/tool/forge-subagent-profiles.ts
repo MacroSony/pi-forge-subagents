@@ -89,9 +89,10 @@ export function registerForgeSubagentProfilesTool(
 				const hostIds = new Set(profiles.map(canonicalProfileId));
 				for (const configuredKey of Object.keys(settings.profiles)) {
 					if (settings.profiles[configuredKey]?.enabled !== true) continue;
-					if (hostIds.has(configuredKey)
-						|| hostIds.has(`project:${configuredKey}`)
-						|| hostIds.has(`global:${configuredKey}`)) continue;
+					const matchingHostId = configuredKey.startsWith("project:") || configuredKey.startsWith("global:")
+						? configuredKey
+						: `project:${configuredKey}`;
+					if (hostIds.has(matchingHostId)) continue;
 					configWarnings.push(`pi-forge-subagents: configured profile key "${configuredKey}" does not match any host profile.`);
 				}
 				summaries = profiles.flatMap((profile) => {

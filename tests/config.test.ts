@@ -110,6 +110,32 @@ test("bare project profile keys resolve from canonical selectors", () => {
 	}
 });
 
+test("bare keys in global config warn and do not authorize global profiles", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-global-bare-project-"));
+	const globalRoot = mkdtempSync(join(tmpdir(), "pi-forge-subagents-global-bare-config-"));
+	const previousForge = process.env.PI_FORGE_GLOBAL_FORGE_DIR;
+	try {
+		process.env.PI_FORGE_GLOBAL_FORGE_DIR = globalRoot;
+		mkdirSync(join(globalRoot, ".pi", "forge"), { recursive: true });
+		writeFileSync(join(globalRoot, ".pi", "forge", "subagents.json"), JSON.stringify({
+			profiles: { reviewer: { enabled: true } },
+		}), "utf8");
+
+		const settings = loadForgeSubagentSettings(context(cwd));
+		assert.equal(resolveSubagentProfilePolicy(settings, "global:reviewer").enabled, false);
+		assert.equal(resolveSubagentProfilePolicy(settings, "project:reviewer").enabled, true);
+		assert.equal(
+			settings.warnings.some((message) => message.includes('bare global profile key "reviewer"') && message.includes('"global:reviewer"')),
+			true,
+		);
+	} finally {
+		if (previousForge === undefined) delete process.env.PI_FORGE_GLOBAL_FORGE_DIR;
+		else process.env.PI_FORGE_GLOBAL_FORGE_DIR = previousForge;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(globalRoot, { recursive: true, force: true });
+	}
+});
+
 test("profile-level values report per-file provenance (global vs project)", () => {
 	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-provenance-1-"));
 	const globalRoot = mkdtempSync(join(tmpdir(), "pi-forge-subagents-provenance-global-"));

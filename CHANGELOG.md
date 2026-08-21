@@ -62,6 +62,22 @@
 
 ### Fixed
 
+- Global profile authorization now reports actionable warnings for bare keys
+  such as `reviewer`, which authorize only `project:reviewer`; users must write
+  `global:reviewer` for a global host profile. Profile discovery uses the same
+  strict selector matching, so a bare key is no longer incorrectly treated as
+  matching a global profile while still returning an empty catalog.
+  Direct `forge_subagent` and runtime preparation failures now include the same
+  `global:<id>` correction when that exact misconfiguration is detected.
+- The Subagent Settings record editor now routes newly added `global:<id>`
+  entries directly to the global `subagents.json`; their explicit scope is no
+  longer lost to the trusted-project default write target. Editing also
+  migrates an old wrong-file copy, and untrusted contexts cannot write explicit
+  project selectors.
+- Bare delegation invocations are canonicalized to `project:<id>` at the
+  authorization boundary, preventing host effective lookup from falling back
+  to a same-named global profile after a project-only bare authorization.
+
 - The host profile snapshot is now structurally validated immediately
   after `resolveProfile()`, before the execution intent or backend preflight
   are built (0.5.x review A3). `prepare` fails fast with `snapshot.*`
@@ -100,4 +116,3 @@
   `ForgeResolveProfileResponse`, and the runtime preparation path drops its
   `unknown` casts for messages/diagnostics. The only remaining cast is the
   documented snapshot projection at the host boundary.
-

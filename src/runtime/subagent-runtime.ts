@@ -41,8 +41,10 @@ import type { ForgeHostSession } from "../host/session.ts";
 import {
 	MAX_SUBAGENT_TIMEOUT_MS,
 	MIN_SUBAGENT_TIMEOUT_MS,
+	canonicalDelegationProfileId,
 	isValidSubagentTimeoutMs,
 	loadForgeSubagentSettings,
+	profileAuthorizationHint,
 	resolveSubagentProfilePolicy,
 } from "../config/subagents.ts";
 
@@ -187,12 +189,14 @@ export function createForgeSubagentRuntime(
 		if (!session) {
 			return { ok: false, diagnostics: [error("host.session", "No pi-forge host session; start a session first.")] };
 		}
-		const canonicalProfileId = profileId;
-		const policy = resolveSubagentProfilePolicy(loadForgeSubagentSettings(ctx), canonicalProfileId);
+		const canonicalProfileId = canonicalDelegationProfileId(profileId);
+		const settings = loadForgeSubagentSettings(ctx);
+		const policy = resolveSubagentProfilePolicy(settings, canonicalProfileId);
 		if (!policy.enabled) {
+			const hint = profileAuthorizationHint(settings, canonicalProfileId);
 			return {
 				ok: false,
-				diagnostics: [error("host.profile-disabled", `Agent profile "${profileId}" is not enabled for subagent delegation in subagents.json.`)],
+				diagnostics: [error("host.profile-disabled", `Agent profile "${profileId}" is not enabled for subagent delegation in subagents.json.${hint ? ` ${hint}` : ""}`)],
 			};
 		}
 		const timeoutMs = run?.timeoutMs ?? policy.timeout.milliseconds;

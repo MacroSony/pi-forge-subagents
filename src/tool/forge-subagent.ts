@@ -4,7 +4,7 @@ import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext, type Theme 
 import { Type } from "typebox";
 import type { AgentResponse, SubagentDiagnostic } from "../contract/index.ts";
 import type { ForgeSubagentPreparedRun, ForgeSubagentRuntime, SubagentBackendExecutionUpdate } from "../runtime/subagent-runtime.ts";
-import { loadForgeSubagentSettings, resolveSubagentProfilePolicy } from "../config/subagents.ts";
+import { canonicalDelegationProfileId, loadForgeSubagentSettings, profileAuthorizationHint, resolveSubagentProfilePolicy } from "../config/subagents.ts";
 import type { ForgeHostSession } from "../host/session.ts";
 
 const APPROVE = "Approve and run";
@@ -161,12 +161,13 @@ export function registerForgeSubagentTool(
 			parameters: ForgeSubagentParameters,
 			executionMode: "parallel",
 			async execute(_toolCallId, params, signal, onUpdate, ctx): Promise<AgentToolResult<ForgeSubagentToolDetails>> {
+				const canonicalProfileId = canonicalDelegationProfileId(params.profileId);
 				const settings = loadForgeSubagentSettings(ctx);
 				const approvalRequired = !settings.allowAgentInvocationWithoutApproval;
 				const configDiagnostics = settings.warnings.map((message): SubagentDiagnostic => ({ level: "warning", code: "host.config", message }));
 				const baseDetails: ForgeSubagentToolDetails = {
 					status: "preparing",
-					profileId: params.profileId,
+					profileId: canonicalProfileId,
 					task: params.task,
 					approval: { required: approvalRequired, approved: false, viewedFullPrompt: false, source: approvalRequired ? "none" : "trusted-project-config" },
 					diagnostics: configDiagnostics,
@@ -189,10 +190,11 @@ export function registerForgeSubagentTool(
 				if (!session) {
 					return { content: toolContent("pi-forge-subagents: no Forge host session (start a session first)."), details: { ...baseDetails, status: "failed" } };
 				}
-				const policy = resolveSubagentProfilePolicy(settings, params.profileId, approvalRequired ? params.backend : undefined);
+				const policy = resolveSubagentProfilePolicy(settings, canonicalProfileId, approvalRequired ? params.backend : undefined);
 				if (!policy.enabled) {
+					const hint = profileAuthorizationHint(settings, canonicalProfileId);
 					return {
-						content: toolContent(`Pi Forge agent profile "${params.profileId}" is not enabled for subagent delegation.`),
+						content: toolContent(`Pi Forge agent profile "${params.profileId}" is not enabled for subagent delegation.${hint ? ` ${hint}` : ""}`),
 						details: { ...baseDetails, status: "failed" },
 					};
 				}
@@ -232,7 +234,7 @@ export function registerForgeSubagentTool(
 				onUpdate?.({ content: toolContent("Preparing the exact subagent prompt; provider transport is still closed."), details: baseDetails });
 				let prepared: ForgeSubagentPreparedRun | undefined;
 				try {
-					const preparation = await runtime.prepare(params.profileId, params.task, ctx, {
+					const preparation = await runtime.prepare(canonicalProfileId, params.task, ctx, {
 						backendId: policy.backend.id,
 						timeoutMs: policy.timeout.milliseconds,
 						...(modelOverride ? { model: modelOverride } : {}),

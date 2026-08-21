@@ -66,6 +66,52 @@ test("forge_subagent_profiles is registered and returns enabled profiles", async
 	}
 });
 
+test("global host profiles require global-scoped configuration keys", async () => {
+	const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-global-profile-project-"));
+	const globalRoot = mkdtempSync(join(tmpdir(), "pi-forge-subagents-global-profile-config-"));
+	const previousForge = process.env.PI_FORGE_GLOBAL_FORGE_DIR;
+	try {
+		process.env.PI_FORGE_GLOBAL_FORGE_DIR = globalRoot;
+		mkdirSync(join(globalRoot, ".pi", "forge"), { recursive: true });
+		const configPath = join(globalRoot, ".pi", "forge", "subagents.json");
+		writeFileSync(configPath, JSON.stringify({ profiles: { reviewer: { enabled: true } } }), "utf8");
+		let captured: any;
+		const pi = {
+			registerTool: (tool: any) => { captured = tool; },
+			getActiveTools: () => ["forge_subagent"],
+		} as any;
+		const globalProfile = { ...profileSummary(), profileId: "reviewer", scope: "global" as const };
+		const session = { listProfiles: async () => [globalProfile] } as unknown as ForgeHostSession;
+		registerForgeSubagentProfilesTool(pi, () => session);
+		const ctx = {
+			cwd,
+			isProjectTrusted: () => true,
+			modelRegistry: { getAll: () => [], getAvailable: () => [], find: () => undefined, hasConfiguredAuth: () => false },
+			sessionManager: { getSessionId: () => "s" },
+		} as any;
+
+		const bareResult = await captured.execute("call", {}, undefined, undefined, ctx);
+		const bareDetails = bareResult.details as { profiles: ForgeSubagentProfileSummary[]; configWarnings: string[] };
+		assert.equal(bareDetails.profiles.length, 0);
+		assert.equal(bareDetails.configWarnings.some((warning) => /bare global profile key/.test(warning)), true);
+		assert.equal(bareDetails.configWarnings.some((warning) => /does not match any host profile/.test(warning)), true);
+
+		writeFileSync(configPath, JSON.stringify({ profiles: { "global:reviewer": { enabled: true } } }), "utf8");
+		const scopedResult = await captured.execute("call", {}, undefined, undefined, ctx);
+		const scopedDetails = scopedResult.details as { profiles: ForgeSubagentProfileSummary[]; configWarnings: string[] };
+		assert.deepEqual(scopedDetails.profiles.map((profile) => profile.id), ["global:reviewer"]);
+		assert.equal(scopedDetails.configWarnings.some((warning) => /does not match any host profile/.test(warning)), false);
+	} finally {
+		if (previousForge === undefined) delete process.env.PI_FORGE_GLOBAL_FORGE_DIR;
+		else process.env.PI_FORGE_GLOBAL_FORGE_DIR = previousForge;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(globalRoot, { recursive: true, force: true });
+	}
+});
+
 test("canonicalProfileId and summarizeProfile use scoped selectors", () => {
 	const profile = profileSummary();
 	const policy = resolveSubagentProfilePolicy(settings(), canonicalProfileId(profile));

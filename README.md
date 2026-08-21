@@ -20,6 +20,23 @@ Subagent configuration lives in `.pi/forge/subagents.json` (project) and
 `~/.pi/forge/subagents.json` (global). Legacy `config.json.subagents` is accepted
 as a read-only fallback with a warning.
 
+Profile keys are scope selectors, not just profile names. Use canonical
+`project:<id>` or `global:<id>` keys. A bare key is retained for compatibility
+with project profiles only and never grants authority to a same-named global
+profile:
+
+```json
+{
+  "backend": "pi-rpc-readonly",
+  "timeoutMs": 120000,
+  "allowAgentInvocationWithoutApproval": true,
+  "profiles": {
+    "global:image-viewer": { "enabled": true },
+    "global:reviewer": { "enabled": true }
+  }
+}
+```
+
 ## Development
 
 ```sh

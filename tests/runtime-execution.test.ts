@@ -109,6 +109,33 @@ test("runtime executes the full chain: preflight -> seal -> prepare -> execute",
 	}
 });
 
+test("bare delegation selectors are pinned to project scope and cannot fall back to a global host profile", async () => {
+	const ctx = fakeCtx();
+	const cwd = ctx.cwd as string;
+	let resolvedSelector = "";
+	const session = {
+		resolveProfile: async (selector: string) => {
+			resolvedSelector = selector;
+			if (selector === "reviewer") return { snapshot: { ...SNAPSHOT, profileId: "global:reviewer" } };
+			throw new Error(`Unknown profile: ${selector}`);
+		},
+	} as unknown as ForgeHostSession;
+	const runtime = createForgeSubagentRuntime(() => session, { builtInBackends: false });
+	mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+	writeFileSync(join(cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
+		profiles: { reviewer: { enabled: true } },
+	}), "utf8");
+	try {
+		const preparation = await runtime.prepare("reviewer", "Review the patch.", ctx);
+		assert.equal(preparation.ok, false);
+		assert.equal(resolvedSelector, "project:reviewer");
+		if (!preparation.ok) assert.match(preparation.diagnostics[0]?.message ?? "", /Unknown profile: project:reviewer/);
+	} finally {
+		await runtime.dispose();
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("runtime carries a per-run model override into the sealed plan", async () => {
 	const fakeBackend = new DeterministicFakeBackend({ id: "fake-test-backend", fidelity: "backend-assisted" });
 	const runtime: ForgeSubagentRuntime = createForgeSubagentRuntime(fakeSession, {

@@ -222,6 +222,69 @@ test("writeSubagentSettingsValues preserves global provenance for existing globa
 	}
 });
 
+test("writeSubagentSettingsValues routes a new global selector to global config", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-new-global-cwd-"));
+	const globalRoot = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-new-global-root-"));
+	const previousForge = process.env.PI_FORGE_GLOBAL_FORGE_DIR;
+	try {
+		process.env.PI_FORGE_GLOBAL_FORGE_DIR = globalRoot;
+		const ctx = context(cwd);
+		const result = writeSubagentSettingsValues(ctx, {
+			profiles: {
+				"global:reviewer": { enabled: true, backend: "", timeoutMs: "" },
+			},
+		});
+		assert.equal(result.ok, true);
+
+		const global = JSON.parse(readFileSync(globalSubagentsConfigPath(), "utf8"));
+		assert.deepEqual(global.profiles["global:reviewer"], {
+			enabled: true,
+			backend: null,
+			timeoutMs: null,
+		});
+		const projectPath = projectSubagentsConfigPath(cwd);
+		const project = existsSync(projectPath) ? JSON.parse(readFileSync(projectPath, "utf8")) : {};
+		assert.equal(project.profiles?.["global:reviewer"], undefined);
+	} finally {
+		if (previousForge === undefined) delete process.env.PI_FORGE_GLOBAL_FORGE_DIR;
+		else process.env.PI_FORGE_GLOBAL_FORGE_DIR = previousForge;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(globalRoot, { recursive: true, force: true });
+	}
+});
+
+test("scoped settings migrate an old wrong-file copy and reject untrusted project writes", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-migrate-cwd-"));
+	const globalRoot = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-migrate-global-"));
+	const previousForge = process.env.PI_FORGE_GLOBAL_FORGE_DIR;
+	try {
+		process.env.PI_FORGE_GLOBAL_FORGE_DIR = globalRoot;
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		writeFileSync(projectSubagentsConfigPath(cwd), JSON.stringify({
+			profiles: { "global:reviewer": { enabled: false, backend: "stale" } },
+		}), "utf8");
+		const trusted = writeSubagentSettingsValues(context(cwd), {
+			profiles: { "global:reviewer": { enabled: true, backend: "pi-rpc-readonly", timeoutMs: "30000" } },
+		});
+		assert.equal(trusted.ok, true);
+		const project = JSON.parse(readFileSync(projectSubagentsConfigPath(cwd), "utf8"));
+		assert.equal(project.profiles?.["global:reviewer"], undefined);
+		const global = JSON.parse(readFileSync(globalSubagentsConfigPath(), "utf8"));
+		assert.equal(global.profiles["global:reviewer"].enabled, true);
+
+		const untrusted = writeSubagentSettingsValues(context(cwd, false), {
+			profiles: { "project:worker": { enabled: true } },
+		});
+		assert.equal(untrusted.ok, false);
+		if (!untrusted.ok) assert.match(untrusted.errors["profiles.project:worker"] ?? "", /trusted project/);
+	} finally {
+		if (previousForge === undefined) delete process.env.PI_FORGE_GLOBAL_FORGE_DIR;
+		else process.env.PI_FORGE_GLOBAL_FORGE_DIR = previousForge;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(globalRoot, { recursive: true, force: true });
+	}
+});
+
 test("subagent settings tab id is exported for the provider descriptor", () => {
 	assert.equal(SUBAGENT_SETTINGS_TAB_ID, "subagent-config");
 });

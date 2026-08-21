@@ -115,6 +115,20 @@ export function resolveSubagentProfilePolicy(
 	return { enabled, backend: { id: backendId, source: backendSource }, timeout: { milliseconds: timeoutMs, source: timeoutSource } };
 }
 
+export function profileAuthorizationHint(settings: ForgeSubagentSettings, profileId: string): string | undefined {
+	if (!profileId.startsWith("global:")) return undefined;
+	const bare = profileId.slice("global:".length);
+	if (!bare || settings.profiles[bare]?.enabled !== true) return undefined;
+	return `Configuration key "${bare}" authorizes only project:${bare}; use "global:${bare}" in subagents.json to authorize this global profile.`;
+}
+
+/** Delegation never uses the host catalog's project-first bare fallback. */
+export function canonicalDelegationProfileId(profileId: string): string {
+	return profileId.startsWith("project:") || profileId.startsWith("global:")
+		? profileId
+		: `project:${profileId}`;
+}
+
 function profileSettingsKey(settings: ForgeSubagentSettings, profileId: string): string | undefined {
 	// Prefer exact canonical keys, then support bare project IDs in project-scoped
 	// selectors. Bare IDs never imply global delegation authority.
@@ -197,6 +211,12 @@ function applySection(raw: Record<string, unknown>, source: "project" | "global"
 	}
 	if (raw.profiles && typeof raw.profiles === "object" && !Array.isArray(raw.profiles)) {
 		for (const [profileId, value] of Object.entries(raw.profiles as Record<string, unknown>)) {
+			if (source === "global" && !isScopedProfileId(profileId)) {
+				pushWarningOnce(
+					settings.warnings,
+					`pi-forge-subagents: bare global profile key "${profileId}" authorizes only project:${profileId}; use "global:${profileId}" to authorize the global profile.`,
+				);
+			}
 			if (!value || typeof value !== "object" || Array.isArray(value)) {
 				settings.warnings.push(`pi-forge-subagents: profile ${profileId} settings must be an object; ignored.`);
 				continue;
@@ -212,4 +232,12 @@ function applySection(raw: Record<string, unknown>, source: "project" | "global"
 			settings.profilesSource[profileId] = source;
 		}
 	}
+}
+
+function isScopedProfileId(profileId: string): boolean {
+	return profileId.startsWith("project:") || profileId.startsWith("global:");
+}
+
+function pushWarningOnce(warnings: string[], warning: string): void {
+	if (!warnings.includes(warning)) warnings.push(warning);
 }

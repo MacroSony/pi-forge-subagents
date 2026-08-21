@@ -34,6 +34,49 @@ test("forge_subagent tool is formally registered and fails cleanly without a hos
 	assert.match(text, /no Forge host session/);
 });
 
+test("forge_subagent explains how a bare global config key differs from a global selector", async () => {
+	const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-tool-global-hint-project-"));
+	const globalRoot = mkdtempSync(join(tmpdir(), "pi-forge-subagents-tool-global-hint-config-"));
+	const previousForge = process.env.PI_FORGE_GLOBAL_FORGE_DIR;
+	try {
+		process.env.PI_FORGE_GLOBAL_FORGE_DIR = globalRoot;
+		mkdirSync(join(globalRoot, ".pi", "forge"), { recursive: true });
+		writeFileSync(join(globalRoot, ".pi", "forge", "subagents.json"), JSON.stringify({
+			profiles: { reviewer: { enabled: true } },
+		}), "utf8");
+		let captured: any;
+		const pi = { registerTool: (tool: any) => { captured = tool; } } as any;
+		const runtime = {
+			backendIds: () => [],
+			descriptors: () => [],
+			prepare: async () => ({ ok: false as const, diagnostics: [] }),
+			discard: async () => undefined,
+			execute: async () => { throw new Error("should not execute"); },
+			dispose: async () => undefined,
+		} as ForgeSubagentRuntime;
+		registerForgeSubagentTool(pi, runtime, { sessionProvider: () => ({}) as any });
+		const ctx = {
+			cwd,
+			hasUI: false,
+			isProjectTrusted: () => true,
+			sessionManager: { getSessionId: () => "s" },
+			modelRegistry: { getAll: () => [], getAvailable: () => [], find: () => undefined, hasConfiguredAuth: () => false },
+			ui: { select: async () => "Reject", editor: async () => undefined, notify: () => undefined },
+		} as any;
+
+		const result = await captured.execute("call", { profileId: "global:reviewer", task: "x" }, undefined, undefined, ctx);
+		const text = Array.isArray(result.content) ? result.content[0]?.text ?? "" : "";
+		assert.match(text, /key "reviewer" authorizes only project:reviewer/);
+		assert.match(text, /use "global:reviewer"/);
+	} finally {
+		if (previousForge === undefined) delete process.env.PI_FORGE_GLOBAL_FORGE_DIR;
+		else process.env.PI_FORGE_GLOBAL_FORGE_DIR = previousForge;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(globalRoot, { recursive: true, force: true });
+	}
+});
+
 test("forge_subagent rejects per-call backend override in unattended mode", async () => {
 	const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
 	const { tmpdir } = await import("node:os");
