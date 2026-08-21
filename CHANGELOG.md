@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.5.1 - Unreleased
+
+- Call-time model override for `forge_subagent`: an optional `model` parameter
+  (`provider/id`, parsed and validated) lets the main agent pick the execution
+  model per call; resolution order is `model` param over profile default. Same
+  policy as the `backend` param — interactive overrides are allowed, unattended
+  invocation stays pinned to the profile/configured model and rejects the
+  override. The override is carried into the sealed execution plan, and the
+  approval summary's existing `Model:` line shows the effective model.
+- Restored rich TUI rendering for subagent runs: ported the 0.4-style
+  `renderCall`/`renderResult` (pi-tui Container/Markdown) into the current tool,
+  adapted to the present details shape — collapsed/expanded states, live
+  progress from `details.progress`, the approval receipt, and usage/model stats
+  in the expanded result.
+- Subagent Settings UI contribution provider: implements the pi-forge
+  ui-contribution port (`@zihanw/pi-forge/ui-contribution`) so a generic
+  schema-driven "Subagent Settings" tab appears in the web editor when this
+  package is installed. `listContributions` maps `ForgeSubagentSettings` to a
+  form schema (backend, timeout, unattended-invocation and summary flags, plus a
+  per-profile enabled/backend/timeout record table); `writeValues` re-validates
+  server-side with the existing validators and persists to `subagents.json`
+  with project/global precedence and per-file provenance intact. The provider
+  registers on session start and disposes on session shutdown.
+- `/forge-agent config` prints the resolved effective subagent settings with
+  sources (backend, timeout, unattended flag, summary flag, and per-profile
+  delegation entries), mirroring what the web tab writes.
+
 ## 0.5.0 - 2026-08-21
 
 - Initial optional-package scaffold for Lane 3 of pi-forge 0.5.0.
