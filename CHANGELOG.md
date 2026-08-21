@@ -1,44 +1,6 @@
 # Changelog
 
-## Unreleased
-
-- Fix: the host profile snapshot is now structurally validated immediately
-  after `resolveProfile()`, before the execution intent or backend preflight
-  are built (0.5.x review A3). `prepare` fails fast with `snapshot.*`
-  diagnostics on a malformed snapshot; regression test asserts backends are
-  never touched in that case. Plan creation keeps its own validation as an
-  integrity net.
-- Changed: dev/test Pi SDK pins aligned with the main package at `0.84.2`
-  (0.5.x review A4); `pi-coding-agent` no longer lags at `0.83.0`.
-- Fix: profile-level `backend`/`timeoutMs` provenance is reported correctly.
-  `loadForgeSubagentSettings` now tracks which config file each `profiles`
-  entry came from (`profilesSource`), and `resolveSubagentProfilePolicy`
-  reports that file's scope instead of hardcoding `"project"` — a
-  global-configured `global:<id>` profile no longer masquerades as
-  project-sourced. Regression test covers per-file provenance.
-- Changed: consume the strengthened `/subagent` host-port DTO types from
-  `@zihanw/pi-forge` — `ForgeHostSession.resolveProfile` returns the typed
-  `ForgeResolveProfileResponse`, and the runtime preparation path drops its
-  `unknown` casts for messages/diagnostics. The only remaining cast is the
-  documented snapshot projection at the host boundary.
-- Fix: host preparation diagnostics are reported exactly once.
-  `toPreparationOutput` no longer aliases the top-level `diagnostics` array onto
-  `toolNegotiation.diagnostics`, and `prepare()` no longer re-pushes them before
-  plan diagnostics are collected. Regression test asserts no duplicated
-  host-preparation diagnostics.
-- Fix: align dependency policy with the main `pi-forge` package —
-  `@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, and
-  `@earendil-works/pi-tui` are now optional `peerDependencies` (`*`) instead of
-  hard `dependencies`, kept as `devDependencies` for local development so the
-  extension no longer installs private duplicate copies of Pi packages.
-- Fix: serialize disposal of replaced runtime generations in
-  `createForgeSubagentRuntime` — teardown of a replaced generation is awaited
-  before `prepare`/`execute` use the fresh generation, and disposal errors are
-  caught and surfaced instead of becoming unhandled rejections. Regression test
-  proves a fresh generation's preflight waits for the replaced generation's
-  disposal.
-
-## 0.5.0 - 2026-08-20
+## 0.5.0 - 2026-08-21
 
 - Initial optional-package scaffold for Lane 3 of pi-forge 0.5.0.
 - `ForgeHostSession`: discover/connect to the active pi-forge host over the
@@ -70,3 +32,45 @@
   extension factories over a shared event bus, and runs discover →
   listProfiles → resolveProfile → prepare → dispose → host-shutdown against a
   fixture workspace, ending with rediscovery failure after disposal.
+
+### Fixed
+
+- The host profile snapshot is now structurally validated immediately
+  after `resolveProfile()`, before the execution intent or backend preflight
+  are built (0.5.x review A3). `prepare` fails fast with `snapshot.*`
+  diagnostics on a malformed snapshot; regression test asserts backends are
+  never touched in that case. Plan creation keeps its own validation as an
+  integrity net.
+- Profile-level `backend`/`timeoutMs` provenance is reported correctly.
+  `loadForgeSubagentSettings` now tracks which config file each `profiles`
+  entry came from (`profilesSource`), and `resolveSubagentProfilePolicy`
+  reports that file's scope instead of hardcoding `"project"` — a
+  global-configured `global:<id>` profile no longer masquerades as
+  project-sourced. Regression test covers per-file provenance.
+- Host preparation diagnostics are reported exactly once.
+  `toPreparationOutput` no longer aliases the top-level `diagnostics` array onto
+  `toolNegotiation.diagnostics`, and `prepare()` no longer re-pushes them before
+  plan diagnostics are collected. Regression test asserts no duplicated
+  host-preparation diagnostics.
+- Align dependency policy with the main `pi-forge` package —
+  `@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, and
+  `@earendil-works/pi-tui` are now optional `peerDependencies` (`*`) instead of
+  hard `dependencies`, kept as `devDependencies` for local development so the
+  extension no longer installs private duplicate copies of Pi packages.
+- Serialize disposal of replaced runtime generations in
+  `createForgeSubagentRuntime` — teardown of a replaced generation is awaited
+  before `prepare`/`execute` use the fresh generation, and disposal errors are
+  caught and surfaced instead of becoming unhandled rejections. Regression test
+  proves a fresh generation's preflight waits for the replaced generation's
+  disposal.
+
+### Changed
+
+- Dev/test Pi SDK pins aligned with the main package at `0.84.2`
+  (0.5.x review A4); `pi-coding-agent` no longer lags at `0.83.0`.
+- Consume the strengthened `/subagent` host-port DTO types from
+  `@zihanw/pi-forge` — `ForgeHostSession.resolveProfile` returns the typed
+  `ForgeResolveProfileResponse`, and the runtime preparation path drops its
+  `unknown` casts for messages/diagnostics. The only remaining cast is the
+  documented snapshot projection at the host boundary.
+
