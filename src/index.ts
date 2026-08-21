@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { UiContributionProvider } from "@zihanw/pi-forge/ui-contribution";
 import type { ForgePrepareRequest } from "@zihanw/pi-forge/subagent";
 import { ForgeHostSession } from "./host/session.ts";
 import { createForgeSubagentRuntime } from "./runtime/subagent-runtime.ts";
@@ -6,6 +7,7 @@ import { registerForgeAgentCommand } from "./command/forge-agent.ts";
 import { registerForgeSubagentTool } from "./tool/forge-subagent.ts";
 import { canonicalProfileId, registerForgeSubagentProfilesTool, renderEmbeddedSummaryText, summarizeProfile } from "./tool/forge-subagent-profiles.ts";
 import { loadForgeSubagentSettings, resolveSubagentProfilePolicy } from "./config/subagents.ts";
+import { createForgeSubagentSettingsContribution } from "./ui-contribution/subagent-settings-contribution.ts";
 
 export { ForgeHostSession } from "./host/session.ts";
 export type { ForgeHostSessionOptions } from "./host/session.ts";
@@ -34,17 +36,34 @@ export interface ForgeSubagentsExtensionContext {
  */
 export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtensionContext {
 	let session: ForgeHostSession | undefined;
+	let settingsContribution: UiContributionProvider | undefined;
+	let settingsContributionContext: any;
 	const runtime = createForgeSubagentRuntime(() => session);
+
+	function startSettingsContribution(ctx: any): void {
+		settingsContribution?.stop();
+		settingsContributionContext = ctx;
+		settingsContribution = createForgeSubagentSettingsContribution(pi.events as never, () => settingsContributionContext);
+		settingsContribution.start();
+	}
+
+	function stopSettingsContribution(): void {
+		settingsContribution?.stop();
+		settingsContribution = undefined;
+		settingsContributionContext = undefined;
+	}
 
 	pi.on("session_start", async (_event: unknown, ctx: any) => {
 		session?.dispose();
 		session = await ForgeHostSession.connect(pi.events as never);
+		startSettingsContribution(ctx);
 		await refreshToolDescription(ctx);
 	});
 
 	pi.on("session_shutdown", async () => {
 		session?.dispose();
 		session = undefined;
+		stopSettingsContribution();
 		await runtime.dispose();
 	});
 
@@ -105,6 +124,9 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 			return session;
 		},
 		dispose() {
+			settingsContribution?.stop();
+			settingsContribution = undefined;
+			settingsContributionContext = undefined;
 			session?.dispose();
 			session = undefined;
 			void runtime.dispose();

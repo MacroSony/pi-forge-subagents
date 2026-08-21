@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { loadForgeSubagentSettings } from "../config/subagents.ts";
+import { loadForgeSubagentSettings, resolveSubagentProfilePolicy } from "../config/subagents.ts";
 import type { ForgeHostSession } from "../host/session.ts";
 import type { ForgeSubagentRuntime } from "../runtime/subagent-runtime.ts";
 import { requestForgeSubagentApproval } from "../tool/forge-subagent.ts";
@@ -14,15 +14,16 @@ export function registerForgeAgentCommand(
 		getArgumentCompletions: (prefix) => {
 			const trimmed = prefix.trimStart();
 			if (!trimmed.includes(" ")) {
-				return ["backends", "plan", "run"].filter((cmd) => cmd.startsWith(trimmed)).map((cmd) => ({ value: cmd, label: cmd }));
+				return ["backends", "config", "plan", "run"].filter((cmd) => cmd.startsWith(trimmed)).map((cmd) => ({ value: cmd, label: cmd }));
 			}
 			return null;
 		},
 		handler: async (args, ctx) => {
 			const trimmed = args.trim();
 			const [command = "help", ...rest] = trimmed ? trimmed.split(/\s+/) : ["help"];
-			if (command === "help" || command === "backends") {
+			if (command === "help" || command === "backends" || command === "config") {
 				if (command === "backends") await showBackends(runtime, ctx);
+				else if (command === "config") await showConfig(ctx);
 				else await showHelp(ctx);
 				return;
 			}
@@ -120,6 +121,29 @@ function parsePlanRunArgs(command: string, rest: string[]): ParsedPlanRun {
 	return { ok: true, profile, task: taskTokens.join(" "), ...(backend ? { backend } : {}) };
 }
 
+async function showConfig(ctx: ExtensionCommandContext): Promise<void> {
+	const settings = loadForgeSubagentSettings(ctx);
+	const lines = [
+		"Resolved subagent settings:",
+		`Backend: ${settings.backend ?? "(built-in pi-subprocess-readonly)"} (${settings.backendSource ?? "built-in"})`,
+		`Timeout: ${settings.timeoutMs} ms (${settings.timeoutSource})`,
+		`Allow unattended invocation: ${settings.allowAgentInvocationWithoutApproval ? "yes" : "no"}`,
+		`Summary in tool description: ${settings.summaryInToolDescription ? "yes" : "no"} (${settings.summaryInToolDescriptionSource ?? "built-in"})`,
+		"",
+		"Profiles:",
+	];
+	const profileIds = Object.keys(settings.profiles);
+	if (profileIds.length === 0) lines.push("  (none)");
+	for (const profileId of profileIds) {
+		const policy = resolveSubagentProfilePolicy(settings, profileId);
+		lines.push(`  ${profileId}: enabled=${policy.enabled ? "yes" : "no"}, backend=${policy.backend.id} (${policy.backend.source}), timeout=${policy.timeout.milliseconds} ms (${policy.timeout.source})`);
+	}
+	if (settings.warnings.length > 0) {
+		lines.push("", "Warnings:", ...settings.warnings.map((warning) => `  ${warning}`));
+	}
+	await showText(ctx, "pi-forge subagent config", lines.join("\n"));
+}
+
 async function showBackends(runtime: ForgeSubagentRuntime, ctx: ExtensionCommandContext): Promise<void> {
 	const settings = loadForgeSubagentSettings(ctx);
 	const descriptors = runtime.descriptors(ctx);
@@ -181,10 +205,12 @@ async function showHelp(ctx: ExtensionCommandContext): Promise<void> {
 		"Foreground read-only subprocess agent commands:",
 		"",
 		"  /forge-agent backends",
+		"  /forge-agent config",
 		"  /forge-agent plan <profile> [--backend <id>] <task>",
 		"  /forge-agent run <profile> [--backend <id>] <task>",
 		"",
 		"plan prepares and validates the exact request without provider transport.",
+		"config prints the resolved subagent settings with sources.",
 		"run prepares the exact prompt, asks for human approval, then executes one foreground text task.",
 	].join("\n"));
 }
