@@ -43,7 +43,11 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 	function startSettingsContribution(ctx: any): void {
 		settingsContribution?.stop();
 		settingsContributionContext = ctx;
-		settingsContribution = createForgeSubagentSettingsContribution(pi.events as never, () => settingsContributionContext);
+		settingsContribution = createForgeSubagentSettingsContribution(
+			pi.events as never,
+			() => settingsContributionContext,
+			async () => session ? session.listProfiles() : [],
+		);
 		settingsContribution.start();
 	}
 

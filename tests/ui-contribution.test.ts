@@ -3,317 +3,386 @@ import test from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ForgeProfileSummary } from "@zihanw/pi-forge/subagent";
 import { UiContributionClient } from "@zihanw/pi-forge/ui-contribution";
 import {
-	SUBAGENT_SETTINGS_TAB_ID,
+	GLOBAL_SUBAGENT_SETTINGS_TAB_ID,
+	PROJECT_SUBAGENT_SETTINGS_TAB_ID,
 	buildSubagentSettingsSchema,
+	buildSubagentSettingsTabs,
 	createForgeSubagentSettingsContribution,
-	settingsToContributionValues,
-	writeSubagentSettingsValues,
+	scopedConfigToContributionValues,
+	writeScopedSubagentSettings,
 } from "../src/ui-contribution/subagent-settings-contribution.ts";
-import {
-	globalSubagentsConfigPath,
-	loadForgeSubagentSettings,
-	projectSubagentsConfigPath,
-} from "../src/config/subagents.ts";
+import { globalSubagentsConfigPath, projectSubagentsConfigPath } from "../src/config/subagents.ts";
 
 class MemoryTransport {
 	private handlers = new Map<string, Set<(data: unknown) => void>>();
-
 	emit(channel: string, data: unknown): void {
 		for (const handler of [...(this.handlers.get(channel) ?? [])]) handler(data);
 	}
-
 	on(channel: string, handler: (data: unknown) => void): () => void {
 		const set = this.handlers.get(channel) ?? new Set<(data: unknown) => void>();
 		set.add(handler);
 		this.handlers.set(channel, set);
-		let off = false;
-		return () => {
-			if (!off) {
-				off = true;
-				set.delete(handler);
-			}
-		};
+		return () => set.delete(handler);
 	}
 }
 
 const GLOBAL_ROOT = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-global-"));
 process.env.PI_FORGE_GLOBAL_FORGE_DIR = GLOBAL_ROOT;
-test.after(() => {
-	rmSync(GLOBAL_ROOT, { recursive: true, force: true });
-});
+test.after(() => rmSync(GLOBAL_ROOT, { recursive: true, force: true }));
 
 function context(cwd: string, trusted = true) {
 	return { cwd, isProjectTrusted: () => trusted } as any;
 }
 
-test("subagent settings schema maps the expected fields and record columns", () => {
-	const schema = buildSubagentSettingsSchema();
-	assert.deepEqual(schema.fields.map((field) => field.key), [
-		"backend",
-		"timeoutMs",
-		"allowAgentInvocationWithoutApproval",
-		"summaryInToolDescription",
-		"profiles",
-	]);
+function profile(profileId: string, scope: "project" | "global", overrides: Partial<ForgeProfileSummary> = {}): ForgeProfileSummary {
+	return {
+		profileId,
+		scope,
+		name: profileId === "worker" ? "Worker" : profileId,
+		model: { provider: "test", id: "model" },
+		thinkingLevel: "high",
+		promptStack: null,
+		usable: true,
+		diagnostics: [],
+		...overrides,
+	};
+}
 
-	const backend = schema.fields.find((field) => field.key === "backend")!;
-	assert.equal(backend.type, "string");
+const catalog = [profile("worker", "project"), profile("reviewer", "global")];
 
-	const timeout = schema.fields.find((field) => field.key === "timeoutMs")!;
-	assert.equal(timeout.type, "number");
-	assert.equal(timeout.required, true);
-
-	const profiles = schema.fields.find((field) => field.key === "profiles")!;
-	assert.equal(profiles.type, "record");
-	assert.deepEqual(profiles.recordFields?.map((field) => field.key), ["enabled", "backend", "timeoutMs"]);
+test("package requires the first pi-forge release that exposes ui-contribution", () => {
+	const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+	assert.equal(manifest.dependencies["@zihanw/pi-forge"], "^0.5.1");
 });
 
-test("settingsToContributionValues renders empty strings for unset profile overrides", () => {
-	const settings = {
-		backend: "pi-rpc-readonly",
-		backendSource: "project",
-		timeoutMs: 90_000,
-		timeoutSource: "global",
-		allowAgentInvocationWithoutApproval: true,
-		summaryInToolDescription: true,
-		summaryInToolDescriptionSource: "project",
-		profiles: {
-			"project:worker": { enabled: true, backend: "pi-subprocess-readonly", timeoutMs: 30_000 },
-			"global:reviewer": { enabled: false },
-		},
-		profilesSource: {
-			"project:worker": "project",
-			"global:reviewer": "global",
-		},
-		warnings: [],
-	} as any;
-
-	const values = settingsToContributionValues(settings);
-	assert.equal(values.backend, "pi-rpc-readonly");
-	assert.equal(values.timeoutMs, 90_000);
-	assert.equal(values.allowAgentInvocationWithoutApproval, true);
-	assert.equal(values.summaryInToolDescription, true);
-	const profiles = values.profiles as Record<string, Record<string, unknown>>;
-	assert.deepEqual(profiles["project:worker"], {
-		enabled: true,
-		backend: "pi-subprocess-readonly",
-		timeoutMs: "30000",
-	});
-	assert.deepEqual(profiles["global:reviewer"], {
-		enabled: false,
+function completeValues(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+	return {
 		backend: "",
 		timeoutMs: "",
+		allowAgentInvocationWithoutApproval: "inherit",
+		summaryInToolDescription: "inherit",
+		profiles: {},
+		...overrides,
+	};
+}
+
+test("settings tabs separate project and global raw configuration with catalog-backed profile keys", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-tabs-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		writeFileSync(projectSubagentsConfigPath(cwd), JSON.stringify({ profiles: { "project:missing": { enabled: true } } }), "utf8");
+		const tabs = buildSubagentSettingsTabs(context(cwd), catalog);
+		assert.deepEqual(tabs.map((tab) => tab.tabId), [PROJECT_SUBAGENT_SETTINGS_TAB_ID, GLOBAL_SUBAGENT_SETTINGS_TAB_ID]);
+		assert.match(tabs[0]!.schema.description ?? "", new RegExp(projectSubagentsConfigPath(cwd).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+		assert.match(tabs[1]!.schema.description ?? "", /global configuration only/);
+
+		const projectProfiles = tabs[0]!.schema.fields.find((field) => field.key === "profiles")!;
+		assert.equal(projectProfiles.type, "record");
+		assert.deepEqual(projectProfiles.keyOptions, [
+			{ value: "project:worker", label: "Project · worker — Worker" },
+			{ value: "project:missing", label: "project:missing · configured profile not found" },
+		]);
+		const globalProfiles = tabs[1]!.schema.fields.find((field) => field.key === "profiles")!;
+		assert.deepEqual(globalProfiles.keyOptions, [{ value: "global:reviewer", label: "Global · reviewer" }]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("duplicate catalog selectors are excluded without invalidating the settings contribution", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-duplicate-catalog-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		writeFileSync(projectSubagentsConfigPath(cwd), JSON.stringify({
+			profiles: { "project:worker": { enabled: true } },
+		}), "utf8");
+		const duplicateCatalog = [
+			profile("worker", "project", { usable: false }),
+			profile("worker", "project", { usable: false, name: "Duplicate Worker" }),
+			profile("reviewer", "global"),
+		];
+		const tabs = buildSubagentSettingsTabs(context(cwd), duplicateCatalog);
+		assert.equal(tabs.length, 2);
+		const profileField = tabs[0]!.schema.fields.find((field) => field.key === "profiles")!;
+		assert.deepEqual(profileField.keyOptions, [{
+			value: "project:worker",
+			label: "project:worker · configured profile is ambiguous",
+		}]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("untrusted projects expose only the global settings page", () => {
+	const tabs = buildSubagentSettingsTabs(context("/untrusted", false), catalog);
+	assert.deepEqual(tabs.map((tab) => tab.tabId), [GLOBAL_SUBAGENT_SETTINGS_TAB_ID]);
+});
+
+test("scoped values retain absence as inherit instead of materializing effective defaults", () => {
+	assert.deepEqual(scopedConfigToContributionValues({
+		backend: "pi-rpc-readonly",
+		allowAgentInvocationWithoutApproval: false,
+		profiles: { "global:reviewer": { enabled: true, timeoutMs: 30_000 } },
+	}), {
+		backend: "pi-rpc-readonly",
+		timeoutMs: "",
+		allowAgentInvocationWithoutApproval: "disabled",
+		summaryInToolDescription: "inherit",
+		profiles: {
+			"global:reviewer": { enabled: true, backend: "", timeoutMs: "30000" },
+		},
 	});
 });
 
-test("writeSubagentSettingsValues rejects invalid values without writing", () => {
-	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-invalid-"));
-	try {
-		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
-		const ctx = context(cwd);
-
-		const invalidTimeout = writeSubagentSettingsValues(ctx, { timeoutMs: 0 });
-		assert.equal(invalidTimeout.ok, false);
-		if (!invalidTimeout.ok) assert.match(invalidTimeout.errors.timeoutMs ?? "", /integer from 1000 to 3600000/);
-
-		const invalidProfileTimeout = writeSubagentSettingsValues(ctx, {
-			profiles: { "project:worker": { enabled: true, timeoutMs: "later" } },
-		});
-		assert.equal(invalidProfileTimeout.ok, false);
-		if (!invalidProfileTimeout.ok) assert.match(invalidProfileTimeout.errors["profiles.project:worker.timeoutMs"] ?? "", /integer from 1000 to 3600000/);
-
-		const unknownField = writeSubagentSettingsValues(ctx, { nope: true });
-		assert.equal(unknownField.ok, false);
-		if (!unknownField.ok) assert.equal(unknownField.errors.nope, "Unknown setting.");
-
-		const wrongType = writeSubagentSettingsValues(ctx, { allowAgentInvocationWithoutApproval: "yes" });
-		assert.equal(wrongType.ok, false);
-		if (!wrongType.ok) assert.match(wrongType.errors.allowAgentInvocationWithoutApproval ?? "", /boolean/);
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
+test("scope schema uses tri-state overrides and no free-text profile id", () => {
+	const schema = buildSubagentSettingsSchema("project", "/project/.pi/forge/subagents.json", catalog, {});
+	assert.equal(schema.fields.find((field) => field.key === "timeoutMs")?.required, undefined);
+	assert.deepEqual(schema.fields.find((field) => field.key === "allowAgentInvocationWithoutApproval")?.options, [
+		{ value: "inherit", label: "Inherit" },
+		{ value: "enabled", label: "Enabled" },
+		{ value: "disabled", label: "Disabled" },
+	]);
+	assert.deepEqual(schema.fields.find((field) => field.key === "profiles")?.keyOptions?.map((option: any) => option.value), ["project:worker"]);
 });
 
-test("writeSubagentSettingsValues persists project settings to the project subagents.json", () => {
-	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-project-"));
+test("project writes replace the project profile table, delete omitted entries, and preserve unrelated keys", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-project-write-"));
 	try {
-		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
-		const ctx = context(cwd);
-		const result = writeSubagentSettingsValues(ctx, {
-			backend: "pi-rpc-readonly",
-			timeoutMs: 120_000,
-			allowAgentInvocationWithoutApproval: true,
-			summaryInToolDescription: true,
-			profiles: {
-				"project:worker": { enabled: true, backend: "pi-subprocess-readonly", timeoutMs: "30000" },
-			},
-		});
-		assert.equal(result.ok, true);
-
-		const projectPath = projectSubagentsConfigPath(cwd);
-		assert.equal(existsSync(projectPath), true);
-		const project = JSON.parse(readFileSync(projectPath, "utf8"));
-		assert.equal(project.backend, "pi-rpc-readonly");
-		assert.equal(project.timeoutMs, 120_000);
-		assert.equal(project.allowAgentInvocationWithoutApproval, true);
-		assert.equal(project.summaryInToolDescription, true);
-		assert.deepEqual(project.profiles["project:worker"], {
-			enabled: true,
-			backend: "pi-subprocess-readonly",
-			timeoutMs: 30_000,
-		});
-
-		const reloaded = loadForgeSubagentSettings(ctx);
-		assert.equal(reloaded.backend, "pi-rpc-readonly");
-		assert.equal(reloaded.timeoutMs, 120_000);
-		assert.equal(reloaded.profiles["project:worker"]?.enabled, true);
-	} finally {
-		rmSync(cwd, { recursive: true, force: true });
-	}
-});
-
-test("writeSubagentSettingsValues preserves global provenance for existing global values", () => {
-	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-global-cwd-"));
-	const globalRoot = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-global-root-"));
-	const previousForge = process.env.PI_FORGE_GLOBAL_FORGE_DIR;
-	try {
-		process.env.PI_FORGE_GLOBAL_FORGE_DIR = globalRoot;
-		mkdirSync(join(globalRoot, ".pi", "forge"), { recursive: true });
-		writeFileSync(join(globalRoot, ".pi", "forge", "subagents.json"), JSON.stringify({
-			backend: "pi-rpc-readonly",
-			timeoutMs: 90_000,
-			profiles: {
-				"global:worker": { enabled: true, backend: "pi-rpc-readonly", timeoutMs: 20_000 },
-			},
-		}), "utf8");
-		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
-		writeFileSync(join(cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
-			profiles: { "project:worker": { enabled: true } },
-		}), "utf8");
-
-		const ctx = context(cwd);
-		const result = writeSubagentSettingsValues(ctx, {
-			backend: "pi-subprocess-readonly",
-			profiles: {
-				"global:worker": { enabled: true, backend: "pi-subprocess-readonly", timeoutMs: "30000" },
-			},
-		});
-		assert.equal(result.ok, true);
-
-		const global = JSON.parse(readFileSync(globalSubagentsConfigPath(), "utf8"));
-		assert.equal(global.backend, "pi-subprocess-readonly");
-		assert.deepEqual(global.profiles["global:worker"], {
-			enabled: true,
-			backend: "pi-subprocess-readonly",
-			timeoutMs: 30_000,
-		});
-
-		const project = JSON.parse(readFileSync(projectSubagentsConfigPath(cwd), "utf8"));
-		assert.equal(project.backend, undefined);
-		assert.equal(project.profiles["project:worker"]?.enabled, true);
-		assert.equal(project.profiles["global:worker"], undefined);
-	} finally {
-		if (previousForge === undefined) delete process.env.PI_FORGE_GLOBAL_FORGE_DIR;
-		else process.env.PI_FORGE_GLOBAL_FORGE_DIR = previousForge;
-		rmSync(cwd, { recursive: true, force: true });
-		rmSync(globalRoot, { recursive: true, force: true });
-	}
-});
-
-test("writeSubagentSettingsValues routes a new global selector to global config", () => {
-	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-new-global-cwd-"));
-	const globalRoot = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-new-global-root-"));
-	const previousForge = process.env.PI_FORGE_GLOBAL_FORGE_DIR;
-	try {
-		process.env.PI_FORGE_GLOBAL_FORGE_DIR = globalRoot;
-		const ctx = context(cwd);
-		const result = writeSubagentSettingsValues(ctx, {
-			profiles: {
-				"global:reviewer": { enabled: true, backend: "", timeoutMs: "" },
-			},
-		});
-		assert.equal(result.ok, true);
-
-		const global = JSON.parse(readFileSync(globalSubagentsConfigPath(), "utf8"));
-		assert.deepEqual(global.profiles["global:reviewer"], {
-			enabled: true,
-			backend: null,
-			timeoutMs: null,
-		});
-		const projectPath = projectSubagentsConfigPath(cwd);
-		const project = existsSync(projectPath) ? JSON.parse(readFileSync(projectPath, "utf8")) : {};
-		assert.equal(project.profiles?.["global:reviewer"], undefined);
-	} finally {
-		if (previousForge === undefined) delete process.env.PI_FORGE_GLOBAL_FORGE_DIR;
-		else process.env.PI_FORGE_GLOBAL_FORGE_DIR = previousForge;
-		rmSync(cwd, { recursive: true, force: true });
-		rmSync(globalRoot, { recursive: true, force: true });
-	}
-});
-
-test("scoped settings migrate an old wrong-file copy and reject untrusted project writes", () => {
-	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-migrate-cwd-"));
-	const globalRoot = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-migrate-global-"));
-	const previousForge = process.env.PI_FORGE_GLOBAL_FORGE_DIR;
-	try {
-		process.env.PI_FORGE_GLOBAL_FORGE_DIR = globalRoot;
 		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
 		writeFileSync(projectSubagentsConfigPath(cwd), JSON.stringify({
-			profiles: { "global:reviewer": { enabled: false, backend: "stale" } },
+			futureSetting: { keep: true },
+			profiles: {
+				"project:old": { enabled: true },
+				"project:worker": { enabled: false, futureProfileSetting: { keep: true } },
+			},
 		}), "utf8");
-		const trusted = writeSubagentSettingsValues(context(cwd), {
-			profiles: { "global:reviewer": { enabled: true, backend: "pi-rpc-readonly", timeoutMs: "30000" } },
+		const result = writeScopedSubagentSettings(context(cwd), "project", completeValues({
+			backend: "pi-rpc-readonly",
+			timeoutMs: 120_000,
+			allowAgentInvocationWithoutApproval: "enabled",
+			profiles: { "project:worker": { enabled: true, backend: "", timeoutMs: "30000" } },
+		}), catalog);
+		assert.equal(result.ok, true);
+		const projectFile = JSON.parse(readFileSync(projectSubagentsConfigPath(cwd), "utf8"));
+		assert.deepEqual(projectFile.futureSetting, { keep: true });
+		assert.equal(projectFile.profiles["project:old"], undefined);
+		assert.deepEqual(projectFile.profiles["project:worker"], {
+			enabled: true,
+			futureProfileSetting: { keep: true },
+			timeoutMs: 30_000,
 		});
-		assert.equal(trusted.ok, true);
-		const project = JSON.parse(readFileSync(projectSubagentsConfigPath(cwd), "utf8"));
-		assert.equal(project.profiles?.["global:reviewer"], undefined);
-		const global = JSON.parse(readFileSync(globalSubagentsConfigPath(), "utf8"));
-		assert.equal(global.profiles["global:reviewer"].enabled, true);
-
-		const untrusted = writeSubagentSettingsValues(context(cwd, false), {
-			profiles: { "project:worker": { enabled: true } },
-		});
-		assert.equal(untrusted.ok, false);
-		if (!untrusted.ok) assert.match(untrusted.errors["profiles.project:worker"] ?? "", /trusted project/);
+		assert.equal(projectFile.backend, "pi-rpc-readonly");
+		assert.equal(projectFile.allowAgentInvocationWithoutApproval, true);
 	} finally {
-		if (previousForge === undefined) delete process.env.PI_FORGE_GLOBAL_FORGE_DIR;
-		else process.env.PI_FORGE_GLOBAL_FORGE_DIR = previousForge;
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("empty and inherit values delete only the selected scope overrides", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-inherit-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		writeFileSync(projectSubagentsConfigPath(cwd), JSON.stringify({
+			backend: "old",
+			timeoutMs: 20_000,
+			allowAgentInvocationWithoutApproval: true,
+			summaryInToolDescription: false,
+			profiles: { "project:worker": { enabled: true } },
+		}), "utf8");
+		const result = writeScopedSubagentSettings(context(cwd), "project", completeValues(), catalog);
+		assert.equal(result.ok, true);
+		assert.deepEqual(JSON.parse(readFileSync(projectSubagentsConfigPath(cwd), "utf8")), {});
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("partial patches preserve omitted scalar fields while an explicit profiles table replaces entries", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-partial-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		writeFileSync(projectSubagentsConfigPath(cwd), JSON.stringify({
+			backend: "pi-rpc-readonly",
+			timeoutMs: 90_000,
+			allowAgentInvocationWithoutApproval: true,
+			profiles: { "project:old": { enabled: true } },
+		}), "utf8");
+		const result = writeScopedSubagentSettings(context(cwd), "project", {
+			profiles: { "project:worker": { enabled: true, backend: "", timeoutMs: "" } },
+		}, catalog);
+		assert.equal(result.ok, true);
+		const saved = JSON.parse(readFileSync(projectSubagentsConfigPath(cwd), "utf8"));
+		assert.equal(saved.backend, "pi-rpc-readonly");
+		assert.equal(saved.timeoutMs, 90_000);
+		assert.equal(saved.allowAgentInvocationWithoutApproval, true);
+		assert.deepEqual(saved.profiles, { "project:worker": { enabled: true } });
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("new nonexistent and cross-scope profile entries are rejected without writing", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-invalid-profile-"));
+	try {
+		const missing = writeScopedSubagentSettings(context(cwd), "project", completeValues({
+			profiles: { "project:ghost": { enabled: true, backend: "", timeoutMs: "" } },
+		}), catalog);
+		assert.equal(missing.ok, false);
+		if (!missing.ok) assert.match(missing.errors["profiles.project:ghost"] ?? "", /does not exist/);
+
+		const wrongScope = writeScopedSubagentSettings(context(cwd), "project", completeValues({
+			profiles: { "global:reviewer": { enabled: true, backend: "", timeoutMs: "" } },
+		}), catalog);
+		assert.equal(wrongScope.ok, false);
+		assert.equal(existsSync(projectSubagentsConfigPath(cwd)), false);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("new entries cannot target an ambiguous duplicate profile selector", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-ambiguous-profile-"));
+	try {
+		const duplicateCatalog = [profile("worker", "project"), profile("worker", "project")];
+		const result = writeScopedSubagentSettings(context(cwd), "project", completeValues({
+			profiles: { "project:worker": { enabled: true, backend: "", timeoutMs: "" } },
+		}), duplicateCatalog);
+		assert.equal(result.ok, false);
+		if (!result.ok) assert.match(result.errors["profiles.project:worker"] ?? "", /ambiguous|duplicate/i);
+		assert.equal(existsSync(projectSubagentsConfigPath(cwd)), false);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("configured missing profiles may be retained or deleted but not newly recreated", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-orphan-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		writeFileSync(projectSubagentsConfigPath(cwd), JSON.stringify({ profiles: { "project:gone": { enabled: true } } }), "utf8");
+		const retained = writeScopedSubagentSettings(context(cwd), "project", completeValues({
+			profiles: { "project:gone": { enabled: false, backend: "", timeoutMs: "" } },
+		}), catalog);
+		assert.equal(retained.ok, true);
+		const removed = writeScopedSubagentSettings(context(cwd), "project", completeValues(), catalog);
+		assert.equal(removed.ok, true);
+		assert.equal(JSON.parse(readFileSync(projectSubagentsConfigPath(cwd), "utf8")).profiles, undefined);
+		const recreated = writeScopedSubagentSettings(context(cwd), "project", completeValues({
+			profiles: { "project:gone": { enabled: true, backend: "", timeoutMs: "" } },
+		}), catalog);
+		assert.equal(recreated.ok, false);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("malformed scoped config is reported and never overwritten by autosave", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-malformed-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		const path = projectSubagentsConfigPath(cwd);
+		writeFileSync(path, "{ not valid JSON", "utf8");
+		const tabs = buildSubagentSettingsTabs(context(cwd), catalog);
+		assert.match(tabs[0]!.schema.description ?? "", /Cannot edit .*Failed to parse/);
+		const result = writeScopedSubagentSettings(context(cwd), "project", { backend: "new" }, catalog);
+		assert.equal(result.ok, false);
+		if (!result.ok) assert.match(result.errors.config ?? "", /Fix the JSON file/);
+		assert.equal(readFileSync(path, "utf8"), "{ not valid JSON");
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("global writes never mutate project configuration and project writes require trust", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-global-write-"));
+	const globalRoot = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-global-root-"));
+	const previous = process.env.PI_FORGE_GLOBAL_FORGE_DIR;
+	try {
+		process.env.PI_FORGE_GLOBAL_FORGE_DIR = globalRoot;
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		writeFileSync(projectSubagentsConfigPath(cwd), JSON.stringify({ projectOnly: true }), "utf8");
+		const globalResult = writeScopedSubagentSettings(context(cwd), "global", completeValues({
+			profiles: { "global:reviewer": { enabled: true, backend: "", timeoutMs: "" } },
+		}), catalog);
+		assert.equal(globalResult.ok, true);
+		assert.equal(JSON.parse(readFileSync(projectSubagentsConfigPath(cwd), "utf8")).projectOnly, true);
+		assert.equal(JSON.parse(readFileSync(globalSubagentsConfigPath(), "utf8")).profiles["global:reviewer"].enabled, true);
+
+		const untrusted = writeScopedSubagentSettings(context(cwd, false), "project", completeValues(), catalog);
+		assert.equal(untrusted.ok, false);
+	} finally {
+		if (previous === undefined) delete process.env.PI_FORGE_GLOBAL_FORGE_DIR;
+		else process.env.PI_FORGE_GLOBAL_FORGE_DIR = previous;
 		rmSync(cwd, { recursive: true, force: true });
 		rmSync(globalRoot, { recursive: true, force: true });
 	}
 });
 
-test("subagent settings tab id is exported for the provider descriptor", () => {
-	assert.equal(SUBAGENT_SETTINGS_TAB_ID, "subagent-config");
-});
-
-test("ui contribution provider lists the settings tab and routes writeValues", async () => {
+test("UI contribution provider refreshes the host profile catalog for list and write", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-port-"));
 	try {
-		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
 		const bus = new MemoryTransport();
-		const provider = createForgeSubagentSettingsContribution(bus, () => context(cwd));
+		let catalogReads = 0;
+		const provider = createForgeSubagentSettingsContribution(bus, () => context(cwd), async () => {
+			catalogReads += 1;
+			return catalog;
+		});
 		provider.start();
 		const client = new UiContributionClient(bus, { defaultTimeoutMs: 200 });
 		const connection = await client.discover();
 		client.connect(connection);
-
 		const listed = await client.listContributions(connection);
-		assert.equal(listed.ok, true);
-		const tabs = (listed.data as { tabs: Array<{ tabId: string; schema: { fields: unknown[] } }> }).tabs;
-		assert.equal(tabs.length, 1);
-		assert.equal(tabs[0]!.tabId, "subagent-config");
-		assert.equal(tabs[0]!.schema.fields.length, 5);
+		assert.equal(listed.ok, true, JSON.stringify(listed));
+		const tabs = (listed.data as { tabs: Array<{ tabId: string }> }).tabs;
+		assert.deepEqual(tabs.map((tab) => tab.tabId), [PROJECT_SUBAGENT_SETTINGS_TAB_ID, GLOBAL_SUBAGENT_SETTINGS_TAB_ID]);
 
-		const written = await client.writeValues(connection, "subagent-config", { timeoutMs: 90_000 });
+		const written = await client.writeValues(connection, PROJECT_SUBAGENT_SETTINGS_TAB_ID, completeValues({
+			profiles: { "project:worker": { enabled: true, backend: "", timeoutMs: "" } },
+		}));
 		assert.equal(written.ok, true);
-		const writeData = written.data as { ok: boolean; values?: Record<string, unknown> };
-		assert.equal(writeData.ok, true);
-		assert.equal(writeData.values?.timeoutMs, 90_000);
-
+		assert.equal((written.data as { ok: boolean }).ok, true);
+		assert.equal(catalogReads, 2);
 		provider.stop();
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("stopped async provider generations cannot write after a replacement provider saves", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-stale-provider-"));
+	try {
+		const bus = new MemoryTransport();
+		let releaseCatalog!: () => void;
+		let catalogStarted!: () => void;
+		const started = new Promise<void>((resolve) => { catalogStarted = resolve; });
+		const blockedCatalog = new Promise<void>((resolve) => { releaseCatalog = resolve; });
+		const oldProvider = createForgeSubagentSettingsContribution(bus, () => context(cwd), async () => {
+			catalogStarted();
+			await blockedCatalog;
+			return catalog;
+		});
+		oldProvider.start();
+		const oldClient = new UiContributionClient(bus, { defaultTimeoutMs: 500 });
+		const oldConnection = await oldClient.discover();
+		oldClient.connect(oldConnection);
+		const oldWrite = oldClient.writeValues(oldConnection, PROJECT_SUBAGENT_SETTINGS_TAB_ID, completeValues({ backend: "stale" }));
+		await started;
+		oldProvider.stop();
+
+		const newProvider = createForgeSubagentSettingsContribution(bus, () => context(cwd), async () => catalog);
+		newProvider.start();
+		const newClient = new UiContributionClient(bus, { defaultTimeoutMs: 500 });
+		const newConnection = await newClient.discover();
+		newClient.connect(newConnection);
+		const newWrite = await newClient.writeValues(newConnection, PROJECT_SUBAGENT_SETTINGS_TAB_ID, completeValues({ backend: "fresh" }));
+		assert.equal(newWrite.ok, true);
+		releaseCatalog();
+		await oldWrite;
+		assert.equal(JSON.parse(readFileSync(projectSubagentsConfigPath(cwd), "utf8")).backend, "fresh");
+		newProvider.stop();
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

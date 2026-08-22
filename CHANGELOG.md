@@ -15,17 +15,20 @@
   progress from `details.progress`, the approval receipt, and usage/model stats
   in the expanded result.
 - Subagent Settings UI contribution provider: implements the pi-forge
-  ui-contribution port (`@zihanw/pi-forge/ui-contribution`) so a generic
-  schema-driven "Subagent Settings" tab appears in the web editor when this
-  package is installed. `listContributions` maps `ForgeSubagentSettings` to a
-  form schema (backend, timeout, unattended-invocation and summary flags, plus a
-  per-profile enabled/backend/timeout record table); `writeValues` re-validates
-  server-side with the existing validators and persists to `subagents.json`
-  with project/global precedence and per-file provenance intact. The provider
-  registers on session start and disposes on session shutdown.
+  ui-contribution port (`@zihanw/pi-forge/ui-contribution`) so separate generic
+  schema-driven Project and Global settings pages appear in the web editor when
+  this package is installed. Each page edits only its raw `subagents.json`
+  scope, exposes inherited values explicitly, and selects profile IDs from the
+  live Forge catalog. `writeValues` re-validates server-side and preserves
+  per-file provenance. The provider registers on session start and disposes on
+  session shutdown.
 - `/forge-agent config` prints the resolved effective subagent settings with
   sources (backend, timeout, unattended flag, summary flag, and per-profile
   delegation entries), mirroring what the web tab writes.
+
+### Fixed
+
+- Reworked Subagent Settings around explicit raw configuration scopes: trusted projects receive separate Project and Global pages with the exact target file shown, nullable top-level values use Inherit instead of materializing effective defaults, and writes replace only the selected scope's profile table while preserving unrelated keys. The profile key is now selected from the live Forge host catalog rather than typed manually; new missing, cross-scope, or ambiguous duplicate selectors are rejected server-side, existing orphan or legacy entries remain removable, and deleting a row now actually removes it from `subagents.json` instead of reappearing after autosave. Malformed files are reported without being overwritten.
 
 ## 0.5.0 - 2026-08-21
 
@@ -61,7 +64,6 @@
   fixture workspace, ending with rediscovery failure after disposal.
 
 ### Fixed
-
 - Global profile authorization now reports actionable warnings for bare keys
   such as `reviewer`, which authorize only `project:reviewer`; users must write
   `global:reviewer` for a global host profile. Profile discovery uses the same

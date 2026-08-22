@@ -37,6 +37,13 @@ profile:
 }
 ```
 
+The web editor exposes separate **Subagents · Project** and **Subagents · Global**
+settings pages. Each page edits only the displayed `subagents.json` file, uses
+the live Forge profile catalog for its profile picker, and treats empty values
+as removal of that scope's override. New entries for missing profiles are
+rejected; previously configured missing or legacy entries remain visible so
+they can be removed or migrated.
+
 ## Development
 
 ```sh
