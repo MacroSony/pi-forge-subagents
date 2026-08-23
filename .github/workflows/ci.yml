@@ -21,16 +21,16 @@ jobs:
         working-directory: pi-forge-subagents
     steps:
       - name: Check out pi-forge-subagents
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: pi-forge-subagents
-      - name: Check out matching pi-forge host
-        uses: actions/checkout@v4
+      - name: Check out current pi-forge host
+        uses: actions/checkout@v6
         with:
           repository: MacroSony/pi-forge
           ref: main
           path: pi-forge
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22.19.0
           cache: npm
