@@ -55,7 +55,8 @@ test("untrusted projects ignore project subagents.json settings", () => {
 });
 
 test("config path helper is stable", () => {
-	assert.equal(projectSubagentsConfigPath("/tmp/proj"), "/tmp/proj/.pi/forge/subagents.json");
+	const root = join(tmpdir(), "proj");
+	assert.equal(projectSubagentsConfigPath(root), join(root, ".pi", "forge", "subagents.json"));
 });
 
 test("optional subagent config parses summaryInToolDescription", () => {

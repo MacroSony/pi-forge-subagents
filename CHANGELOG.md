@@ -2,6 +2,9 @@
 
 ## 0.5.1 - Unreleased
 
+- Added independent Linux, macOS, and Windows GitHub Actions verification for
+  the optional package, including its packed-install smoke against the matching
+  pi-forge host checkout. Generated output is pinned to LF across platforms.
 - Call-time model override for `forge_subagent`: an optional `model` parameter
   (`provider/id`, parsed and validated) lets the main agent pick the execution
   model per call; resolution order is `model` param over profile default. Same
