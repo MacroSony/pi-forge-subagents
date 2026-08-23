@@ -35,5 +35,8 @@ jobs:
           node-version: 22.19.0
           cache: npm
           cache-dependency-path: pi-forge-subagents/package-lock.json
+      - name: Install pi-forge build dependencies
+        working-directory: pi-forge
+        run: npm ci
       - run: npm ci
       - run: npm run verify

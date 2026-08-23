@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const mainRoot = process.env.PI_FORGE_ROOT ?? resolve(rootDir, "../pi-forge");
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const npmCli = process.env.npm_execpath;
+const npm = npmCli ? process.execPath : process.platform === "win32" ? "npm.cmd" : "npm";
+const npmPrefix = npmCli ? [npmCli] : [];
 
 function run(command, args, opts = {}) {
 	const result = spawnSync(command, args, { encoding: "utf8", ...opts });
@@ -20,7 +22,7 @@ function run(command, args, opts = {}) {
 }
 
 function packInto(cwd, into, extraArgs = []) {
-	const stdout = run(npm, ["pack", "--pack-destination", into, "--json", ...extraArgs], { cwd });
+	const stdout = run(npm, [...npmPrefix, "pack", "--pack-destination", into, "--json", ...extraArgs], { cwd });
 	const [manifest] = JSON.parse(stdout);
 	return join(into, manifest.filename);
 }
@@ -176,7 +178,7 @@ try {
 		// drifts from the declared dependency versions.
 		const manifest = JSON.parse(readFileSync(join(rootDir, "package.json"), "utf8"));
 		const pin = (name) => `${name}@${String(manifest.dependencies?.[name] ?? manifest.devDependencies?.[name]).replace(/^\^/, "")}`;
-		run(npm, ["install", mainPack, optionalPack,
+		run(npm, [...npmPrefix, "install", mainPack, optionalPack,
 			pin("@earendil-works/pi-coding-agent"),
 			pin("@earendil-works/pi-ai"),
 			pin("@earendil-works/pi-agent-core"),
