@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.1 - Unreleased
+## 0.5.1 - 2026-08-23
 
 - Added independent Linux, macOS, and Windows GitHub Actions verification for
   the optional package, including its packed-install smoke against the matching
