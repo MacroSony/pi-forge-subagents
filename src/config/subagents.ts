@@ -43,8 +43,9 @@ export function projectSubagentsConfigPath(cwd: string): string {
 }
 
 export function globalSubagentsConfigPath(): string {
-	const env = process.env.PI_FORGE_GLOBAL_FORGE_DIR ?? process.env.PI_FORGE_GLOBAL_DIR;
-	const root = env ?? homedir();
+	const forgeDir = process.env.PI_FORGE_GLOBAL_DIR;
+	if (forgeDir) return join(forgeDir, "subagents.json");
+	const root = process.env.PI_FORGE_GLOBAL_FORGE_DIR ?? homedir();
 	return join(root, ".pi", "forge", "subagents.json");
 }
 
@@ -53,8 +54,9 @@ export function projectLegacyForgeConfigPath(cwd: string): string {
 }
 
 export function globalLegacyForgeConfigPath(): string {
-	const env = process.env.PI_FORGE_GLOBAL_FORGE_DIR ?? process.env.PI_FORGE_GLOBAL_DIR;
-	const root = env ?? homedir();
+	const forgeDir = process.env.PI_FORGE_GLOBAL_DIR;
+	if (forgeDir) return join(forgeDir, "config.json");
+	const root = process.env.PI_FORGE_GLOBAL_FORGE_DIR ?? homedir();
 	return join(root, ".pi", "forge", "config.json");
 }
 

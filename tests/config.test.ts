@@ -3,7 +3,14 @@ import test from "node:test";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_SUBAGENT_BACKEND_ID, loadForgeSubagentSettings, projectSubagentsConfigPath, resolveSubagentProfilePolicy } from "../src/config/subagents.ts";
+import {
+	DEFAULT_SUBAGENT_BACKEND_ID,
+	globalLegacyForgeConfigPath,
+	globalSubagentsConfigPath,
+	loadForgeSubagentSettings,
+	projectSubagentsConfigPath,
+	resolveSubagentProfilePolicy,
+} from "../src/config/subagents.ts";
 
 const TEST_GLOBAL_ROOT = join(tmpdir(), `pi-forge-subagents-global-${process.pid}`);
 process.env.PI_FORGE_GLOBAL_FORGE_DIR = TEST_GLOBAL_ROOT;
@@ -11,6 +18,27 @@ process.env.PI_FORGE_GLOBAL_FORGE_DIR = TEST_GLOBAL_ROOT;
 function context(cwd: string, trusted = true) {
 	return { cwd, isProjectTrusted: () => trusted } as any;
 }
+
+test("PI_FORGE_GLOBAL_DIR points directly to the Forge directory", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-global-dir-project-"));
+	const forgeDir = mkdtempSync(join(tmpdir(), "pi-forge-subagents-global-dir-forge-"));
+	const previous = process.env.PI_FORGE_GLOBAL_DIR;
+	try {
+		process.env.PI_FORGE_GLOBAL_DIR = forgeDir;
+		writeFileSync(join(forgeDir, "subagents.json"), JSON.stringify({
+			profiles: { "global:image-viewer": { enabled: true } },
+		}), "utf8");
+
+		assert.equal(globalSubagentsConfigPath(), join(forgeDir, "subagents.json"));
+		assert.equal(globalLegacyForgeConfigPath(), join(forgeDir, "config.json"));
+		assert.equal(resolveSubagentProfilePolicy(loadForgeSubagentSettings(context(cwd)), "global:image-viewer").enabled, true);
+	} finally {
+		if (previous === undefined) delete process.env.PI_FORGE_GLOBAL_DIR;
+		else process.env.PI_FORGE_GLOBAL_DIR = previous;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(forgeDir, { recursive: true, force: true });
+	}
+});
 
 test("optional subagent config loads dedicated subagents.json and resolves policy", () => {
 	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-config-"));
