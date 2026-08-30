@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Add the opt-in Linux `pi-bwrap-write` backend. Backend registration now owns
+  the fixed access/tool preset: selecting this backend projects isolated
+  workspace-write access without adding a duplicate configuration field.
+- Resolve minimal selected-model provider authentication for Bubblewrap instead
+  of inheriting the host environment, and show effective access, mounts, and
+  process authority in the approval summary.
+- Use the local runtime checkout for dogfooding; replace it with the published
+  runtime beta before release.
+
 ## 0.5.1 - 2026-08-23
 
 - Added independent Linux, macOS, and Windows GitHub Actions verification for

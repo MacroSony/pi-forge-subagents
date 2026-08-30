@@ -21,6 +21,11 @@ import {
 	type PiRpcBackendOptions,
 } from "@zihanw/pi-subagent-runtime/backends/rpc";
 import {
+	PI_BUBBLEWRAP_WRITE_TOOL_CATALOG,
+	PiBubblewrapWriteBackend,
+	type PiBubblewrapWriteBackendOptions,
+} from "@zihanw/pi-subagent-runtime/backends/bubblewrap";
+import {
 	SUBAGENT_CONTRACT_VERSION,
 	createAgentExecutionPlan,
 	hasSubagentErrors,
@@ -91,17 +96,30 @@ export interface ForgeSubagentRuntimeOptions {
 	backendId?: string;
 	subprocess?: Omit<PiSubprocessBackendOptions, "modelRegistry" | "cwd">;
 	rpc?: Omit<PiRpcBackendOptions, "modelRegistry" | "cwd">;
-	/** Extra backends registered alongside the built-in subprocess/RPC backends (mainly for tests). */
+	bubblewrap?: Omit<PiBubblewrapWriteBackendOptions, "modelRegistry" | "cwd" | "workspaceRoots">;
+	/** Extra backends registered alongside the built-in subprocess/RPC/Bubblewrap backends (mainly for tests). */
 	extraBackends?: ExecutionBackend[];
-	/** When false, do not construct the built-in subprocess/RPC backends (tests inject their own). */
+	/** When false, do not construct the built-in subprocess/RPC/Bubblewrap backends (tests inject their own). */
 	builtInBackends?: boolean;
 	/** Tool catalog used to build the execution intent (defaults to the read-only subprocess catalog). */
 	intentToolCatalog?: BackendPreflightAccepted["toolCatalog"];
 }
 
+interface BackendIntentPreset {
+	toolCatalog: BackendPreflightAccepted["toolCatalog"];
+	access: {
+		level: AgentRequest["access"]["level"];
+		workspaceMode: AgentRequest["access"]["workspaces"][number]["mode"];
+		network: AgentRequest["access"]["network"];
+		allowProcess: boolean;
+		executionBoundary: AgentRequest["access"]["executionBoundary"];
+	};
+}
+
 interface RuntimeGeneration {
 	runtime: ExecutionRuntime;
 	backends: Map<string, ReportCapableBackend>;
+	intentPresets: Map<string, BackendIntentPreset>;
 	modelRegistry: ModelRegistry;
 	cwd: string;
 }
@@ -131,7 +149,7 @@ export function createForgeSubagentRuntime(
 	let disposalChain: Promise<void> = Promise.resolve();
 	const prepared = new Map<string, PreparedRecord>();
 	const reports = new Map<string, { backend: ReportCapableBackend; preparedRunId: string }>();
-	const backendIds = ["pi-subprocess-readonly", "pi-rpc-readonly"];
+	const backendIds = ["pi-subprocess-readonly", "pi-rpc-readonly", "pi-bwrap-write"];
 
 	async function disposeGeneration(target: RuntimeGeneration): Promise<void> {
 		await target.runtime.dispose();
@@ -154,6 +172,11 @@ export function createForgeSubagentRuntime(
 		if (generation) scheduleDisposal(generation);
 		const runtime = createExecutionRuntime();
 		const backends = new Map<string, ReportCapableBackend>();
+		const intentPresets = new Map<string, BackendIntentPreset>();
+		const register = (backend: ReportCapableBackend, preset: BackendIntentPreset): void => {
+			backends.set(backend.descriptor.id, backend);
+			intentPresets.set(backend.descriptor.id, preset);
+		};
 		if (options.builtInBackends !== false) {
 			const subprocess = new PiSubprocessBackend({
 				modelRegistry: ctx.modelRegistry,
@@ -165,14 +188,26 @@ export function createForgeSubagentRuntime(
 				cwd: ctx.cwd,
 				...options.rpc,
 			});
-			backends.set(subprocess.descriptor.id, subprocess);
-			backends.set(rpc.descriptor.id, rpc);
+			const bubblewrap = new PiBubblewrapWriteBackend({
+				modelRegistry: ctx.modelRegistry,
+				cwd: ctx.cwd,
+				workspaceRoots: { project: ctx.cwd },
+				envForModel: (model) => bubblewrapModelEnvironment(ctx.modelRegistry, model),
+				apiKeyForModel: (model) => bubblewrapModelApiKey(ctx.modelRegistry, model),
+				...options.bubblewrap,
+			});
+			register(subprocess, readOnlyIntentPreset());
+			register(rpc, readOnlyIntentPreset());
+			register(bubblewrap, bubblewrapWriteIntentPreset());
 		}
 		for (const extra of options.extraBackends ?? []) {
-			backends.set(extra.descriptor.id, extra as ReportCapableBackend);
+			register(
+				extra as ReportCapableBackend,
+				readOnlyIntentPreset(options.intentToolCatalog ?? forgeToolCatalog()),
+			);
 		}
 		for (const backend of backends.values()) runtime.registerBackend(backend);
-		generation = { runtime, backends, modelRegistry: ctx.modelRegistry, cwd: ctx.cwd };
+		generation = { runtime, backends, intentPresets, modelRegistry: ctx.modelRegistry, cwd: ctx.cwd };
 		return generation;
 	}
 
@@ -225,6 +260,14 @@ export function createForgeSubagentRuntime(
 			return { ok: false, diagnostics };
 		}
 
+		const current = ensure(ctx);
+		// A replaced generation must finish tearing down before we start preparing
+		// against the fresh generation.
+		await disposalChain;
+		const backendId = run?.backendId ?? options.backendId ?? policy.backend.id;
+		const backend = current.backends.get(backendId);
+		const intentPreset = current.intentPresets.get(backendId);
+		if (!backend || !intentPreset) return { ok: false, diagnostics: [error("host.backend", `Backend is not registered: ${backendId}`)] };
 		const request: AgentRequest = {
 			schemaVersion: SUBAGENT_CONTRACT_VERSION,
 			requestId: `request:${randomUUID()}`,
@@ -232,25 +275,19 @@ export function createForgeSubagentRuntime(
 			expectedProfileFingerprint: snapshot.profileFingerprint,
 			input: { text: task },
 			access: {
-				level: "read-only",
-				workspaces: [{ handle: "project", mode: "read-only" }],
+				level: intentPreset.access.level,
+				workspaces: [{ handle: "project", mode: intentPreset.access.workspaceMode }],
 				workingDirectory: { workspaceHandle: "project", path: "." },
-				network: "allow",
-				executionBoundary: "shared-user",
+				network: intentPreset.access.network,
+				allowProcess: intentPreset.access.allowProcess,
+				executionBoundary: intentPreset.access.executionBoundary,
 			},
 			limits: { timeoutMs: { value: timeoutMs, enforcement: "best-effort" } },
 			resultProjection: { maxChars: 12_000 },
 			parent: { sessionId: ctx.sessionManager.getSessionId(), depth: 0, maxDepth: 1 },
 			remoteEgressConsent: true,
 		};
-		const current = ensure(ctx);
-		// A replaced generation must finish tearing down before we start preparing
-		// against the fresh generation.
-		await disposalChain;
-		const backendId = run?.backendId ?? options.backendId ?? policy.backend.id;
-		const backend = current.backends.get(backendId);
-		if (!backend) return { ok: false, diagnostics: [error("host.backend", `Backend is not registered: ${backendId}`)] };
-		const intent = executionIntentFor(request, snapshot, options.intentToolCatalog ?? forgeToolCatalog(), run?.model);
+		const intent = executionIntentFor(request, snapshot, intentPreset.toolCatalog, run?.model);
 
 		let hostPreparation: SubagentPreparationOutput | undefined;
 		let handle: PreparedRun;
@@ -425,7 +462,7 @@ function executionIntentFor(
 		requestedTools: negotiation.effectiveToolNames,
 		access: {
 			level: request.access.level,
-			executionBoundary: "shared-user",
+			executionBoundary: request.access.executionBoundary,
 			workspaces: structuredClone(request.access.workspaces),
 			...(request.access.workingDirectory ? { workingDirectory: structuredClone(request.access.workingDirectory) } : {}),
 			network: request.access.network,
@@ -439,6 +476,97 @@ function executionIntentFor(
 			...(snapshot.promptStackId ? { promptStackId: snapshot.promptStackId } : {}),
 		},
 	};
+}
+
+function readOnlyIntentPreset(
+	toolCatalog: BackendPreflightAccepted["toolCatalog"] = forgeToolCatalog(),
+): BackendIntentPreset {
+	return {
+		toolCatalog,
+		access: {
+			level: "read-only",
+			workspaceMode: "read-only",
+			network: "allow",
+			allowProcess: false,
+			executionBoundary: "shared-user",
+		},
+	};
+}
+
+function bubblewrapWriteIntentPreset(): BackendIntentPreset {
+	return {
+		toolCatalog: PI_BUBBLEWRAP_WRITE_TOOL_CATALOG.map((tool) => ({
+			...structuredClone(tool),
+			effects: [...tool.effects],
+		})) as BackendPreflightAccepted["toolCatalog"],
+		access: {
+			level: "workspace-write",
+			workspaceMode: "read-write",
+			network: "allow",
+			allowProcess: true,
+			executionBoundary: "isolated",
+		},
+	};
+}
+
+interface ProviderEnvironmentPolicy {
+	apiKey: string;
+	ambient: readonly string[];
+	bearer?: string;
+}
+
+const BUBBLEWRAP_PROVIDER_ENV: Readonly<Record<string, ProviderEnvironmentPolicy>> = {
+	anthropic: {
+		apiKey: "ANTHROPIC_API_KEY",
+		ambient: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"],
+		bearer: "ANTHROPIC_AUTH_TOKEN",
+	},
+	openai: { apiKey: "OPENAI_API_KEY", ambient: ["OPENAI_API_KEY"] },
+	google: { apiKey: "GEMINI_API_KEY", ambient: ["GEMINI_API_KEY"] },
+	openrouter: { apiKey: "OPENROUTER_API_KEY", ambient: ["OPENROUTER_API_KEY"] },
+	opencode: { apiKey: "OPENCODE_API_KEY", ambient: ["OPENCODE_API_KEY"] },
+	"opencode-go": { apiKey: "OPENCODE_API_KEY", ambient: ["OPENCODE_API_KEY"] },
+};
+
+async function bubblewrapModelApiKey(
+	modelRegistry: ModelRegistry,
+	modelRef: Readonly<{ provider: string; id: string }>,
+): Promise<string | undefined> {
+	const model = modelRegistry.find(modelRef.provider, modelRef.id);
+	if (!model) return undefined;
+	const auth = await modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) return undefined;
+	if (auth.apiKey) return auth.apiKey;
+	const authorization = Object.entries(auth.headers ?? {}).find(
+		([name]) => name.toLowerCase() === "authorization",
+	)?.[1];
+	return authorization ? /^Bearer\s+(.+)$/iu.exec(authorization)?.[1] : undefined;
+}
+
+async function bubblewrapModelEnvironment(
+	modelRegistry: ModelRegistry,
+	modelRef: Readonly<{ provider: string; id: string }>,
+): Promise<Record<string, string>> {
+	const policy = BUBBLEWRAP_PROVIDER_ENV[modelRef.provider];
+	const env: Record<string, string> = {};
+	for (const name of policy?.ambient ?? []) {
+		const value = process.env[name];
+		if (value) env[name] = value;
+	}
+	const model = modelRegistry.find(modelRef.provider, modelRef.id);
+	if (!model) return env;
+	const auth = await modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) return env;
+	Object.assign(env, auth.env ?? {});
+	if (policy && auth.apiKey) env[policy.apiKey] = auth.apiKey;
+	if (policy?.bearer) {
+		const authorization = Object.entries(auth.headers ?? {}).find(
+			([name]) => name.toLowerCase() === "authorization",
+		)?.[1];
+		const bearer = authorization ? /^Bearer\s+(.+)$/iu.exec(authorization)?.[1] : undefined;
+		if (bearer) env[policy.bearer] = bearer;
+	}
+	return env;
 }
 
 function forgeToolCatalog(): BackendPreflightAccepted["toolCatalog"] {

@@ -141,6 +141,12 @@ test("renderApprovalSummary shows the effective model from the sealed plan", () 
 			systemPrompt: "system",
 			messages: [],
 			effectiveToolIds: [],
+			access: {
+				level: "workspace-write",
+				executionBoundary: "isolated",
+				process: true,
+				mounts: [{ workspaceHandle: "project", mountId: "workspace", mode: "read-write" }],
+			},
 			executionFingerprint: "execution",
 			conversationFingerprint: "conversation",
 		},
@@ -148,6 +154,9 @@ test("renderApprovalSummary shows the effective model from the sealed plan", () 
 	const summary = renderApprovalSummary(prepared, "Inspect this code carefully.");
 	assert.match(summary, /override-provider\/override-model/);
 	assert.doesNotMatch(summary, /default-provider/);
+	assert.match(summary, /Access: workspace-write \(isolated\)/);
+	assert.match(summary, /Workspace mounts: project:read-write/);
+	assert.match(summary, /Process: allowed/);
 });
 
 test("forge_subagent rejects per-call model override in unattended mode", async () => {

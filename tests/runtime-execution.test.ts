@@ -287,3 +287,12 @@ test("prepare fails fast on a malformed host snapshot before touching backends",
 		rmSync(cwd, { recursive: true, force: true });
 	}
 });
+
+test("runtime registers the opt-in Bubblewrap write backend", async () => {
+	const runtime = createForgeSubagentRuntime(fakeSession);
+	try {
+		assert.ok(runtime.backendIds().includes("pi-bwrap-write"));
+	} finally {
+		await runtime.dispose();
+	}
+});

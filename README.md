@@ -32,10 +32,30 @@ profile:
   "allowAgentInvocationWithoutApproval": true,
   "profiles": {
     "global:image-viewer": { "enabled": true },
-    "global:reviewer": { "enabled": true }
+    "global:reviewer": { "enabled": true },
+    "project:fixer": {
+      "enabled": true,
+      "backend": "pi-bwrap-write"
+    }
   }
 }
 ```
+
+`pi-bwrap-write` is an opt-in Linux backend. Selecting it is the write
+authorization: it projects isolated `workspace-write` access, exposes
+read/search/edit/write/`bash`, and edits the current git work tree directly.
+The approval dialog shows the effective access and read-write mount. Commit or
+stash existing work before delegation and review the result with `git diff`.
+Combining this backend with `allowAgentInvocationWithoutApproval: true` is an
+explicit unattended/YOLO choice: writes proceed without a fresh human prompt.
+The backend rejects non-git workspaces by default and protects top-level local
+`.git` metadata inside Bubblewrap.
+
+For the first dogfood lane, stored or ambient credentials are projected only
+for the selected model for Anthropic, OpenAI, Google Gemini, OpenRouter, and
+OpenCode. OAuth-only providers whose child cannot consume Pi's `--api-key`
+override remain outside this first lane. Other providers can supply `bubblewrap.env` or `bubblewrap.envForModel` through
+the programmatic runtime options until provider coverage is expanded.
 
 The web editor exposes separate **Subagents · Project** and **Subagents · Global**
 settings pages. Each page edits only the displayed `subagents.json` file, uses

@@ -94,6 +94,9 @@ export function renderApprovalSummary(prepared: ForgeSubagentPreparedRun, task: 
 		`System prompt chars: ${plan.systemPrompt.length}`,
 		`Messages: ${plan.messages.length}`,
 		`Effective tools: ${plan.effectiveToolIds.length}`,
+		`Access: ${plan.access.level} (${plan.access.executionBoundary})`,
+		`Workspace mounts: ${plan.access.mounts.map((mount) => `${mount.workspaceHandle}:${mount.mode}`).join(", ") || "none"}`,
+		`Process: ${plan.access.process ? "allowed" : "denied"}`,
 		`Execution fingerprint: ${plan.executionFingerprint}`,
 		`Conversation fingerprint: ${plan.conversationFingerprint}`,
 	];
@@ -353,7 +356,7 @@ function forgeSubagentToolDescription(embedded?: string): string {
 			? "The enabled profiles are summarized below; run forge_subagent_profiles for full descriptions, diagnostics, and approval mode."
 			: "Use forge_subagent_profiles first when the user has not already specified a profile ID.",
 		"Runs require human approval after exact preparation unless the trusted project explicitly enables unattended agent invocation.",
-		"The child receives only approved read tools, but runs with the invoking user's OS permissions; read-only is not a sandbox.",
+		"The child receives only backend-approved tools. Read-only process backends use the invoking user boundary; pi-bwrap-write runs isolated and directly modifies the selected git workspace.",
 		"The optional backend parameter selects the execution backend for interactively approved runs; unattended invocation always uses the configured default backend.",
 		"The optional model parameter selects the execution model (provider/id) for interactively approved runs; unattended invocation is pinned to the profile/configured model.",
 		"Use the final report as evidence and do not repeatedly request the same rejected delegation.",
