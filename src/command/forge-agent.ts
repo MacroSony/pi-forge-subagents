@@ -10,7 +10,7 @@ export function registerForgeAgentCommand(
 	sessionProvider: () => ForgeHostSession | undefined,
 ): void {
 	pi.registerCommand("forge-agent", {
-		description: "Plan or run a foreground human-approved read-only agent profile",
+		description: "Plan or run a foreground human-approved agent profile",
 		getArgumentCompletions: (prefix) => {
 			const trimmed = prefix.trimStart();
 			if (!trimmed.includes(" ")) {
@@ -149,7 +149,10 @@ async function showBackends(runtime: ForgeSubagentRuntime, ctx: ExtensionCommand
 	const descriptors = runtime.descriptors(ctx);
 	const lines = descriptors.map((descriptor) => [
 		`${descriptor.id} @ ${descriptor.version}`,
-		`  default boundary: shared-user subprocess with read-only model tools`,
+		`  execution boundaries: ${descriptor.capabilities.executionBoundaries.join(", ")}`,
+		`  read-only mount isolation: ${descriptor.capabilities.access.readOnlyMountIsolation ? "yes" : "no"}`,
+		`  read-write mount isolation: ${descriptor.capabilities.access.readWriteMountIsolation ? "yes" : "no"}`,
+		`  process isolation: ${descriptor.capabilities.access.processIsolation ? "yes" : "no"}`,
 		`  prompt runtime: ${descriptor.capabilities.promptRuntimeFidelity}`,
 		`  cancellation: ${descriptor.capabilities.cancellation ? "yes" : "no"}`,
 		`  remote transport: ${descriptor.capabilities.remoteTransport ? "yes" : "no"}`,
@@ -202,7 +205,7 @@ function renderDiagnostics(diagnostics: readonly any[]): string {
 
 async function showHelp(ctx: ExtensionCommandContext): Promise<void> {
 	await showText(ctx, "pi-forge agent backend", [
-		"Foreground read-only subprocess agent commands:",
+		"Foreground subagent commands:",
 		"",
 		"  /forge-agent backends",
 		"  /forge-agent config",
