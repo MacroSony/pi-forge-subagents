@@ -47,7 +47,19 @@ test("forge-agent command registers and backends renders registered backend info
 		descriptors: () => [{
 			id: "pi-subprocess-readonly",
 			version: "v1",
-			capabilities: { promptRuntimeFidelity: "backend-assisted", cancellation: true, remoteTransport: false },
+			capabilities: {
+				access: {
+					readOnlyMountIsolation: false,
+					readWriteMountIsolation: false,
+					symlinkSafeContainment: false,
+					processIsolation: false,
+					agentNetworkIsolation: false,
+				},
+				executionBoundaries: ["shared-user"],
+				promptRuntimeFidelity: "backend-assisted",
+				cancellation: true,
+				remoteTransport: false,
+			},
 		}],
 		prepare: async () => ({ ok: false as const, diagnostics: [] }),
 		discard: async () => undefined,
@@ -77,4 +89,6 @@ test("forge-agent command registers and backends renders registered backend info
 	await captured.handler("backends", ctx);
 	assert.equal(editors.length, 1);
 	assert.match(editors[0]!.text, /pi-subprocess-readonly/);
+	assert.match(editors[0]!.text, /execution boundaries: shared-user/);
+	assert.match(editors[0]!.text, /read-write mount isolation: no/);
 });

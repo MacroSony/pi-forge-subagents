@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.2 - 2026-08-30
 
 - Add the opt-in Linux `pi-bwrap-write` backend. Backend registration now owns
   the fixed access/tool preset: selecting this backend projects isolated
@@ -8,8 +8,11 @@
 - Resolve minimal selected-model provider authentication for Bubblewrap instead
   of inheriting the host environment, and show effective access, mounts, and
   process authority in the approval summary.
-- Use the local runtime checkout for dogfooding; replace it with the published
-  runtime beta before release.
+- Add a real Bubblewrap integration test covering Forge preparation, the
+  backend-owned write preset, sandbox execution, and a direct git-workspace
+  edit without provider network dependency.
+- Report each backend's actual execution and mount-isolation capabilities in
+  `/forge-agent backends` instead of describing every backend as read-only.
 
 ## 0.5.1 - 2026-08-23
 
