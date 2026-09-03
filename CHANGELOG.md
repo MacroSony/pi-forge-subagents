@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.3 - 2026-09-03
 
 - Add a `pi-inprocess` backend with the same workspace-write tool surface as
   `pi-bwrap-write`. It runs the session against the host model runtime with a
