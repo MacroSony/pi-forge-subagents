@@ -292,6 +292,7 @@ export function registerForgeSubagentTool(
 						if (progress.length > MAX_PROGRESS_ITEMS) progress.splice(0, progress.length - MAX_PROGRESS_ITEMS);
 						onUpdate?.({ content: toolContent(update.message), details: { ...running, progress: [...progress] } });
 					});
+					const ranWithNoTools = prepared.plan.effectiveToolIds.length === 0;
 					prepared = undefined;
 					const finalDetails: ForgeSubagentToolDetails = {
 						...running,
@@ -299,7 +300,23 @@ export function registerForgeSubagentTool(
 						progress: [...progress],
 						response,
 					};
-					return { content: toolContent(response.status === "failed" ? `Subagent failed: ${JSON.stringify(response.error ?? {})}` : response.output?.text ?? "(no output)"), details: finalDetails };
+					// Unattended runs have no approval dialog, so surface the plan
+					// diagnostics that explain the effective tool set (or its absence)
+					// directly in the tool result; otherwise a silent empty tool
+					// intersection looks like a model failure.
+					const notes: string[] = [];
+					if (ranWithNoTools) {
+						notes.push("Warning: the subagent ran with NO tools. The intersection of the prompt-stack tool policy, the backend tool catalog, and the access preset was empty.");
+					}
+					const surfaced = finalDetails.diagnostics.filter((diagnostic) =>
+						diagnostic.level !== "info" || diagnostic.code.startsWith("tools."));
+					if (surfaced.length > 0) {
+						notes.push(`Preparation diagnostics:\n${renderDiagnostics(surfaced)}`);
+					}
+					const outputText = response.status === "failed"
+						? `Subagent failed: ${JSON.stringify(response.error ?? {})}`
+						: response.output?.text ?? `(no output; final status: ${response.status})`;
+					return { content: toolContent([outputText, ...notes].join("\n\n")), details: finalDetails };
 				} catch (error) {
 					if (prepared) await runtime.discard(prepared).catch(() => undefined);
 					if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {

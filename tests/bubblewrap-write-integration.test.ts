@@ -60,7 +60,15 @@ test(
 			isProjectTrusted: () => true,
 			sessionManager: { getSessionId: () => "bwrap-integration-session" },
 			signal: undefined,
-			modelRegistry,
+			// The fixture provider is extension-registered (it carries a custom
+			// streamSimple), which the model-portability guard rejects for
+			// fresh-process backends. The child invocation is faked in this test,
+			// so shadow the probe methods to simulate a declarative provider.
+			modelRegistry: Object.create(modelRegistry, {
+				getRegisteredProviderIds: { value: () => [] },
+				getRegisteredNativeProvider: { value: () => undefined },
+				getRegisteredProviderConfig: { value: () => undefined },
+			}),
 		} as any;
 		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
 		writeFileSync(

@@ -188,8 +188,13 @@ export function validateAccessReceipt(value: unknown, path: string, diagnostics:
 			}
 		}
 		if (executionBoundary === "isolated" && value.level === "read-only" && (!value.enforcement.readOnlyMountIsolation || !value.enforcement.symlinkSafeContainment)) diagnostics.push(error("access-receipt.read-isolation", "Isolated read-only access requires mount isolation and symlink-safe containment.", `${path}.enforcement`));
-		if (value.level === "workspace-write" && (!value.enforcement.readWriteMountIsolation || !value.enforcement.symlinkSafeContainment)) diagnostics.push(error("access-receipt.write-isolation", "Workspace-write receipt requires write isolation and symlink-safe containment.", `${path}.enforcement`));
-		if (value.process === true && !value.enforcement.processIsolation) diagnostics.push(error("access-receipt.process-isolation", "Process receipt requires process isolation.", `${path}.enforcement.processIsolation`));
+		// Isolation requirements attach to the isolated boundary only. A
+		// shared-user boundary runs with the invoking user's privileges and must
+		// report every isolation flag as false (checked above), so requiring
+		// isolation there would make honest unisolated write/process access
+		// impossible.
+		if (executionBoundary === "isolated" && value.level === "workspace-write" && (!value.enforcement.readWriteMountIsolation || !value.enforcement.symlinkSafeContainment)) diagnostics.push(error("access-receipt.write-isolation", "Isolated workspace-write receipt requires write isolation and symlink-safe containment.", `${path}.enforcement`));
+		if (executionBoundary === "isolated" && value.process === true && !value.enforcement.processIsolation) diagnostics.push(error("access-receipt.process-isolation", "Isolated process receipt requires process isolation.", `${path}.enforcement.processIsolation`));
 		if (value.network === "deny" && !value.enforcement.agentNetworkIsolation) diagnostics.push(error("access-receipt.network-isolation", "Denied network receipt requires agent network isolation.", `${path}.enforcement.agentNetworkIsolation`));
 	}
 	if (value.level === "none" && value.workingDirectory !== undefined) diagnostics.push(error("access-receipt.none-cwd", "Access none cannot produce a workingDirectory.", `${path}.workingDirectory`));

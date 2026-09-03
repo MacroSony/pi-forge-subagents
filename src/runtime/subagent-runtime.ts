@@ -26,6 +26,11 @@ import {
 	type PiBubblewrapWriteBackendOptions,
 } from "@zihanw/pi-subagent-runtime/backends/bubblewrap";
 import {
+	PI_INPROCESS_TOOL_CATALOG,
+	PiInProcessBackend,
+	type PiInProcessBackendOptions,
+} from "@zihanw/pi-subagent-runtime/backends/inprocess";
+import {
 	SUBAGENT_CONTRACT_VERSION,
 	createAgentExecutionPlan,
 	hasSubagentErrors,
@@ -97,6 +102,7 @@ export interface ForgeSubagentRuntimeOptions {
 	subprocess?: Omit<PiSubprocessBackendOptions, "modelRegistry" | "cwd">;
 	rpc?: Omit<PiRpcBackendOptions, "modelRegistry" | "cwd">;
 	bubblewrap?: Omit<PiBubblewrapWriteBackendOptions, "modelRegistry" | "cwd" | "workspaceRoots">;
+	inprocess?: Omit<PiInProcessBackendOptions, "modelRegistry" | "cwd">;
 	/** Extra backends registered alongside the built-in subprocess/RPC/Bubblewrap backends (mainly for tests). */
 	extraBackends?: ExecutionBackend[];
 	/** When false, do not construct the built-in subprocess/RPC/Bubblewrap backends (tests inject their own). */
@@ -149,7 +155,8 @@ export function createForgeSubagentRuntime(
 	let disposalChain: Promise<void> = Promise.resolve();
 	const prepared = new Map<string, PreparedRecord>();
 	const reports = new Map<string, { backend: ReportCapableBackend; preparedRunId: string }>();
-	const backendIds = ["pi-subprocess-readonly", "pi-rpc-readonly", "pi-bwrap-write"];
+	const freshProcessBackendIds = ["pi-subprocess-readonly", "pi-rpc-readonly", "pi-bwrap-write"];
+	const backendIds = [...freshProcessBackendIds, "pi-inprocess"];
 
 	async function disposeGeneration(target: RuntimeGeneration): Promise<void> {
 		await target.runtime.dispose();
@@ -196,9 +203,15 @@ export function createForgeSubagentRuntime(
 				apiKeyForModel: (model) => bubblewrapModelApiKey(ctx.modelRegistry, model),
 				...options.bubblewrap,
 			});
+			const inprocess = new PiInProcessBackend({
+				modelRegistry: ctx.modelRegistry,
+				cwd: ctx.cwd,
+				...options.inprocess,
+			});
 			register(subprocess, readOnlyIntentPreset());
 			register(rpc, readOnlyIntentPreset());
 			register(bubblewrap, bubblewrapWriteIntentPreset());
+			register(inprocess, inProcessWriteIntentPreset());
 		}
 		for (const extra of options.extraBackends ?? []) {
 			register(
@@ -288,6 +301,11 @@ export function createForgeSubagentRuntime(
 			remoteEgressConsent: true,
 		};
 		const intent = executionIntentFor(request, snapshot, intentPreset.toolCatalog, run?.model);
+		const portability = modelPortabilityDiagnostic(ctx.modelRegistry, intent.model, backendId, freshProcessBackendIds);
+		if (portability) {
+			diagnostics.push(portability);
+			return { ok: false, diagnostics };
+		}
 
 		let hostPreparation: SubagentPreparationOutput | undefined;
 		let handle: PreparedRun;
@@ -509,6 +527,28 @@ function bubblewrapWriteIntentPreset(): BackendIntentPreset {
 	};
 }
 
+/**
+ * In-process preset: same tool surface as the Bubblewrite write preset, but a
+ * shared-user boundary with no OS isolation. This is the backend that can run
+ * extension-registered providers (OAuth, custom streamSimple), because the
+ * session executes against the host model runtime directly.
+ */
+function inProcessWriteIntentPreset(): BackendIntentPreset {
+	return {
+		toolCatalog: PI_INPROCESS_TOOL_CATALOG.map((tool) => ({
+			...structuredClone(tool),
+			effects: [...tool.effects],
+		})) as BackendPreflightAccepted["toolCatalog"],
+		access: {
+			level: "workspace-write",
+			workspaceMode: "read-write",
+			network: "allow",
+			allowProcess: true,
+			executionBoundary: "shared-user",
+		},
+	};
+}
+
 interface ProviderEnvironmentPolicy {
 	apiKey: string;
 	ambient: readonly string[];
@@ -648,4 +688,52 @@ function responseForHost(prepared: ForgeSubagentPreparedRun, result: RunResult):
 
 function cancelReason(signal: AbortSignal): string {
 	return typeof signal.reason === "string" && signal.reason ? signal.reason : "Subagent execution cancelled.";
+}
+
+interface PortabilityProbeRegistry {
+	getRegisteredProviderIds?: () => readonly string[];
+	getRegisteredNativeProvider?: (provider: string) => unknown;
+	getRegisteredProviderConfig?: (provider: string) => unknown;
+}
+
+/**
+ * Fail fast when a fresh-process backend is asked to run a model whose
+ * provider only exists in this process. Fresh-process backends start the
+ * child with --no-extensions, so extension-registered providers can never
+ * resolve there; without this check the run fails late with a confusing
+ * "model not found" from the child.
+ */
+function modelPortabilityDiagnostic(
+	modelRegistry: ModelRegistry,
+	model: Readonly<{ provider: string; id: string }>,
+	backendId: string,
+	freshProcessBackendIds: readonly string[],
+): SubagentDiagnostic | undefined {
+	if (!freshProcessBackendIds.includes(backendId)) return undefined;
+	const registry = modelRegistry as ModelRegistry & PortabilityProbeRegistry;
+	let extensionRegistered = false;
+	if (typeof registry.getRegisteredProviderIds === "function") {
+		const ids: unknown = registry.getRegisteredProviderIds();
+		if (Array.isArray(ids) && ids.includes(model.provider)) extensionRegistered = true;
+	}
+	if (!extensionRegistered && typeof registry.getRegisteredNativeProvider === "function") {
+		extensionRegistered = Boolean(registry.getRegisteredNativeProvider(model.provider));
+	}
+	let config: Record<string, unknown> | undefined;
+	if (typeof registry.getRegisteredProviderConfig === "function") {
+		const raw: unknown = registry.getRegisteredProviderConfig(model.provider);
+		config = raw !== null && typeof raw === "object" ? raw as Record<string, unknown> : undefined;
+		if (config) extensionRegistered = true;
+	}
+	if (!extensionRegistered) return undefined;
+
+	const looksDeclarative = config !== undefined &&
+		typeof config.streamSimple !== "function" &&
+		config.oauth === undefined &&
+		typeof config.refreshModels !== "function";
+	return error(
+		"host.model-not-portable",
+		`Provider "${model.provider}" is registered by a Pi extension. Fresh-process backends start the child with --no-extensions, so this provider cannot resolve there. Use a built-in or models.json-declared provider for this profile, or route the profile to the pi-inprocess backend.` +
+			(looksDeclarative ? " The registration looks declarative (no custom streaming or OAuth)." : ""),
+	);
 }
