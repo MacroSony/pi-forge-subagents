@@ -57,6 +57,20 @@ OpenCode. OAuth-only providers whose child cannot consume Pi's `--api-key`
 override remain outside this first lane. Other providers can supply `bubblewrap.env` or `bubblewrap.envForModel` through
 the programmatic runtime options until provider coverage is expanded.
 
+`pi-inprocess` is a workspace-write backend that runs the subagent directly in
+the host model runtime. It provides the same tool surface as `pi-bwrap-write`,
+but with a shared-user boundary: there is **no OS isolation**, so the subagent
+runs with your user's permissions instead of inside Bubblewrap. Use it for
+profiles that need extension-registered providers, such as OAuth-based or
+custom-streaming providers, because those providers are available in the host
+process and cannot resolve in fresh-process backends that spawn children with
+`--no-extensions`.
+
+When a profile uses an extension-registered provider with
+`pi-subprocess-readonly`, `pi-rpc-readonly`, or `pi-bwrap-write`, preparation
+fails with a `host.model-not-portable` diagnostic. Switch that profile to a
+built-in or `models.json`-declared provider, or route it to `pi-inprocess`.
+
 The web editor exposes separate **Subagents · Project** and **Subagents · Global**
 settings pages. Each page edits only the displayed `subagents.json` file, uses
 the live Forge profile catalog for its profile picker, and treats empty values

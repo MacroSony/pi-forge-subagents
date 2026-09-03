@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Add a `pi-inprocess` backend with the same workspace-write tool surface as
+  `pi-bwrap-write`. It runs the session against the host model runtime with a
+  shared-user boundary and no OS isolation, so extension-registered providers
+  (OAuth, custom streaming, and other model providers registered only in the
+  host process) can resolve.
+- Reject extension-registered model providers on the fresh-process backends
+  (`pi-subprocess-readonly`, `pi-rpc-readonly`, `pi-bwrap-write`) during
+  preparation with a `host.model-not-portable` diagnostic. Those backends start
+  the child with `--no-extensions`; route affected profiles to `pi-inprocess`
+  or use a built-in/`models.json`-declared provider.
+- Surface tool-negotiation diagnostics in unattended subagent tool results,
+  including `tools.*` codes such as `tools.unmatched-allow` and
+  `tools.access-filtered`; warn explicitly when a run executes with zero tools;
+  and include the final run status in the empty-output fallback.
+
 ## 0.5.2 - 2026-08-30
 
 - Add the opt-in Linux `pi-bwrap-write` backend. Backend registration now owns
