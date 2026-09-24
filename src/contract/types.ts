@@ -69,9 +69,11 @@ export type PromptResourcePolicy =
 	| { allow?: string[]; deny?: never }
 	| { allow?: never; deny?: string[] };
 
+export type PromptToolPolicy = PromptResourcePolicy & { initial?: string[] };
+
 export interface PromptStack {
 	id: string;
-	tools?: PromptResourcePolicy;
+	tools?: PromptToolPolicy;
 	/** The host owns the schema; unknown fields pass through for forward compatibility. */
 	[extra: string]: unknown;
 }

@@ -81,6 +81,9 @@ function makeCtx(cwd) {
 			theme: { fg: (_color, text) => text },
 		},
 		model: undefined,
+		modelRegistry: {
+			getAll: () => [], getAvailable: () => [], find: () => undefined, hasConfiguredAuth: () => false,
+		},
 		hasUI: false,
 		isIdle: () => true,
 	};
@@ -88,6 +91,7 @@ function makeCtx(cwd) {
 
 const mainModule = await import("@zihanw/pi-forge");
 const optionalModule = await import("@zihanw/pi-forge-subagents");
+const { DeterministicFakeBackend } = await import("@zihanw/pi-subagent-runtime/testing");
 if (typeof mainModule.default !== "function") throw new Error("main default export missing");
 if (typeof optionalModule.default !== "function") throw new Error("optional default export missing");
 
@@ -125,8 +129,18 @@ const prepared = await session.prepare({
 	profile: "worker",
 	task: { text: "Verify the packed host port." },
 	access: { level: "read-only", network: "deny", allowProcess: false },
-	backend: { model: { provider: "test", id: "model" }, thinkingLevel: "high", toolCatalog: [] },
+	backend: {
+		model: { provider: "test", id: "model" },
+		thinkingLevel: "high",
+		toolCatalog: [
+			{ id: "tool.read", name: "read", effects: [] },
+			{ id: "tool.write", name: "write", effects: [] },
+		],
+	},
 });
+if (JSON.stringify(prepared.effectiveToolNames) !== JSON.stringify(["read"])) {
+	throw new Error("public prepare did not honor tools.initial: " + JSON.stringify(prepared.effectiveToolNames));
+}
 if (!prepared.systemPrompt.includes("PACKED-SMOKE-MARKER")) {
 	throw new Error("prepare did not return the fixture system prompt: " + prepared.systemPrompt);
 }
@@ -138,6 +152,39 @@ if (finalMessage?.content?.[0]?.text !== "Verify the packed host port.") {
 	throw new Error("protected task text mismatch");
 }
 
+const fakeBackend = new DeterministicFakeBackend({ id: "fake-packed", fidelity: "backend-assisted" });
+const runtime = optionalModule.createForgeSubagentRuntime(() => session, {
+	builtInBackends: false,
+	extraBackends: [{
+		descriptor: fakeBackend.descriptor,
+		preflight(input) {
+			const result = fakeBackend.preflight(input);
+			return result.status === "accepted" ? { ...result, toolCatalog: [
+				{ id: "tool.read", name: "read", effects: [] },
+				{ id: "tool.write", name: "write", effects: [] },
+			] } : result;
+		},
+		prepare: fakeBackend.prepare.bind(fakeBackend),
+		start: fakeBackend.start.bind(fakeBackend),
+		discard: fakeBackend.discard.bind(fakeBackend),
+	}],
+	intentToolCatalog: [
+		{ id: "tool.read", name: "read", effects: [] },
+		{ id: "tool.write", name: "write", effects: [] },
+	],
+});
+const runtimeContext = makeCtx(cwd);
+const planned = await runtime.prepare("project:worker", "Execute the packed initial plan.", runtimeContext, {
+	backendId: "fake-packed",
+	timeoutMs: 1_000,
+});
+if (!planned.ok) throw new Error("packed runtime prepare failed: " + planned.diagnostics.map((item) => item.message).join("; "));
+if (JSON.stringify(planned.prepared.plan.effectiveToolIds) !== JSON.stringify(["tool.read"])) {
+	throw new Error("packed runtime plan did not preserve initial selection: " + JSON.stringify(planned.prepared.plan.effectiveToolIds));
+}
+const executed = await runtime.execute(planned.prepared, runtimeContext);
+if (executed.status !== "completed") throw new Error("packed initial execution did not complete: " + executed.status);
+await runtime.dispose();
 await optionalCtx.dispose();
 // Shut down the main host; disposal announces the host going away, and
 // reconnecting afterwards must fail.
@@ -174,10 +221,12 @@ try {
 	const fixture = mkdtempSync(join(tmpdir(), "pi-forge-subagents-fixture-"));
 	try {
 		writeFileSync(join(consumer, "package.json"), JSON.stringify({ name: "smoke-optional", private: true, type: "module" }));
-		// Pin the SDK family from this package's own manifest so the smoke never
-		// drifts from the declared dependency versions.
+		// Pin the SDK family from the packed host's peer-compatible dev versions.
 		const manifest = JSON.parse(readFileSync(join(rootDir, "package.json"), "utf8"));
-		const pin = (name) => `${name}@${String(manifest.dependencies?.[name] ?? manifest.devDependencies?.[name]).replace(/^\^/, "")}`;
+		const mainManifest = JSON.parse(readFileSync(join(mainRoot, "package.json"), "utf8"));
+		// The packed main host is the compatibility anchor. Its current peer SDK
+		// versions may be newer than this optional checkout's dev pins.
+		const pin = (name) => `${name}@${String(mainManifest.devDependencies?.[name] ?? manifest.dependencies?.[name] ?? manifest.devDependencies?.[name]).replace(/^\^/, "")}`;
 		run(npm, [...npmPrefix, "install", mainPack, optionalPack,
 			pin("@earendil-works/pi-coding-agent"),
 			pin("@earendil-works/pi-ai"),
@@ -194,6 +243,7 @@ try {
 			schemaVersion: 2,
 			id: "worker",
 			mode: "replace",
+			tools: { initial: ["read"] },
 			items: [
 				{ kind: "block", id: "sys", role: "system", content: "PACKED-SMOKE-MARKER system prompt." },
 			],
@@ -205,6 +255,9 @@ try {
 			model: { provider: "test", id: "model" },
 			thinkingLevel: "high",
 			promptStack: "worker",
+		}));
+		writeFileSync(join(projectDir, ".pi", "forge", "subagents.json"), JSON.stringify({
+			profiles: { "project:worker": { enabled: true, backend: "fake-packed" } },
 		}));
 		writeFileSync(join(consumer, "smoke.mjs"), SMOKE);
 		run(process.execPath, ["smoke.mjs"], {

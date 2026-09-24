@@ -1,17 +1,29 @@
 import { applyResourcePolicy, resourcePatternMatches } from "./policy.ts";
-import type { PromptResourcePolicy } from "./types.ts";
+import type { PromptToolPolicy } from "./types.ts";
 import type { SubagentAccessRequest, SubagentBackendTool, SubagentDiagnostic, SubagentToolNegotiationResult } from "./types.ts";
 import { validateToolCatalog } from "./validation.ts";
 
 export function negotiateSubagentTools(
 	catalog: readonly SubagentBackendTool[],
-	policy: PromptResourcePolicy | undefined,
+	policy: PromptToolPolicy | undefined,
 	access: SubagentAccessRequest,
 ): SubagentToolNegotiationResult {
 	const diagnostics: SubagentDiagnostic[] = [];
 	validateToolCatalog(catalog, diagnostics);
 	const names = catalog.map((tool) => tool.name);
-	const stackSelectedToolNames = applyResourcePolicy(names, policy);
+	const initial = policy?.initial;
+	if (Array.isArray(initial)) {
+		for (const name of initial) {
+			if (!names.includes(name)) {
+				diagnostics.push({ level: "warning", code: "tools.initial-missing", path: `tools.initial.${name}`, message: `Preset initial tool ${name} is not registered by this backend.` });
+			}
+			if (applyResourcePolicy([name], policy).length === 0) {
+				diagnostics.push({ level: "error", code: "tools.initial-blocked", path: `tools.initial.${name}`, message: `Preset initial tool ${name} is blocked by the allow/deny policy.` });
+			}
+		}
+	}
+	const sourceNames = Array.isArray(initial) ? names.filter((name) => initial.includes(name)) : names;
+	const stackSelectedToolNames = applyResourcePolicy(sourceNames, policy);
 	const selected = new Set(stackSelectedToolNames);
 	const effective = catalog.filter((tool) => selected.has(tool.name) && toolAllowedByAccess(tool, access));
 	const unmatchedAllowPatterns = policy && "allow" in policy

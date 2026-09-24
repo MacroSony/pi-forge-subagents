@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Honor `tools.initial` in independent tool negotiation and execution-plan validation, including explicit empty selection, missing names, policy ceilings and access filtering. The plan integrity check remains enforced.
+- Exercise the real public Forge prepare → optional plan → inert backend execution path in both cross-package regression and packed-install tests. Both registered read/write tools are otherwise accessible so access filtering cannot hide this regression.
+- Document the matching-development-build requirement and coordinated Forge 0.5.5 / subagents 0.5.4 release gate. Manifest bumps and publishing remain separate.
+
 ## 0.5.3 - 2026-09-03
 
 - Add a `pi-inprocess` backend with the same workspace-write tool surface as

@@ -254,6 +254,61 @@ test("tool negotiation intersects stack names with declared tool effects and acc
 	assert.deepEqual(readOnly.effectiveToolNames, ["read", "paint_generate", "paint_validate"]);
 });
 
+test("tool negotiation handles tools.initial with single, empty, omitted, allow-deny+access, and unknown tools", () => {
+	const tools: SubagentBackendTool[] = [
+		{ id: "read-id", name: "read", effects: ["filesystem-read"] },
+		{ id: "write-id", name: "write", effects: ["filesystem-write"] },
+		{ id: "bash-id", name: "bash", effects: ["process"] },
+	];
+	const fullAccess = {
+		level: "workspace-write" as const,
+		workspaces: [{ handle: "workspace", mode: "read-write" as const }],
+		network: "allow" as const,
+		allowProcess: true,
+		executionBoundary: "isolated" as const,
+	};
+
+	// 1. Concrete initial tools: only initial tools are selected
+	const initialRead = negotiateSubagentTools(tools, { allow: ["*"], initial: ["read"] }, fullAccess);
+	assert.deepEqual(initialRead.effectiveToolNames, ["read"]);
+	assert.deepEqual(initialRead.effectiveToolIds, ["read-id"]);
+	assert.deepEqual(initialRead.stackSelectedToolNames, ["read"]);
+	assert.equal(initialRead.diagnostics.length, 0);
+
+	// 2. Explicit empty initial []: zero default tools
+	const emptyInitial = negotiateSubagentTools(tools, { allow: ["*"], initial: [] }, fullAccess);
+	assert.deepEqual(emptyInitial.effectiveToolNames, []);
+	assert.deepEqual(emptyInitial.effectiveToolIds, []);
+	assert.deepEqual(emptyInitial.stackSelectedToolNames, []);
+	assert.equal(emptyInitial.diagnostics.length, 0);
+
+	// 3. Omitted initial: legacy behavior (retains all allow matches)
+	const omittedInitial = negotiateSubagentTools(tools, { allow: ["*"] }, fullAccess);
+	assert.deepEqual(omittedInitial.effectiveToolNames, ["read", "write", "bash"]);
+	assert.deepEqual(omittedInitial.stackSelectedToolNames, ["read", "write", "bash"]);
+
+	// 4a. Initial tool blocked by allow policy: emits tools.initial-blocked error
+	const blockedByAllow = negotiateSubagentTools(tools, { allow: ["read"], initial: ["read", "write"] }, fullAccess);
+	assert.deepEqual(blockedByAllow.effectiveToolNames, ["read"]);
+	assert.ok(blockedByAllow.diagnostics.some((d) => d.code === "tools.initial-blocked" && d.level === "error" && d.path === "tools.initial.write"));
+
+	// 4b. Initial tool blocked by deny policy: emits tools.initial-blocked error
+	const blockedByDeny = negotiateSubagentTools(tools, { deny: ["bash"], initial: ["read", "bash"] }, fullAccess);
+	assert.deepEqual(blockedByDeny.effectiveToolNames, ["read"]);
+	assert.ok(blockedByDeny.diagnostics.some((d) => d.code === "tools.initial-blocked" && d.level === "error" && d.path === "tools.initial.bash"));
+
+	// 4c. Initial tool filtered by request access: emits tools.access-filtered info
+	const filteredByAccess = negotiateSubagentTools(tools, { initial: ["read", "write"] }, { ...fullAccess, level: "read-only" });
+	assert.deepEqual(filteredByAccess.effectiveToolNames, ["read"]);
+	assert.deepEqual(filteredByAccess.stackSelectedToolNames, ["read", "write"]);
+	assert.ok(filteredByAccess.diagnostics.some((d) => d.code === "tools.access-filtered" && d.level === "info" && d.path === "tools.write"));
+
+	// 5. Unknown tool in initial: emits tools.initial-missing warning
+	const unknownTool = negotiateSubagentTools(tools, { initial: ["read", "unknown_custom_tool"] }, fullAccess);
+	assert.deepEqual(unknownTool.effectiveToolNames, ["read"]);
+	assert.ok(unknownTool.diagnostics.some((d) => d.code === "tools.initial-missing" && d.level === "warning" && d.path === "tools.initial.unknown_custom_tool"));
+});
+
 test("selected context budgeting preserves required items and newest optional items deterministically", () => {
 	const items = [
 		{ id: "old", kind: "user-excerpt" as const, text: "old optional", provenance: { source: "session" } },
@@ -401,6 +456,109 @@ test("execution plan creation requires the protected task and carries runtime-is
 	assert.equal(missingTask.plan, undefined);
 	assert.equal(missingTask.diagnostics.some((item) => item.code === "plan.protected-task"), true);
 	assert.deepEqual(createProtectedSubagentTask(req.input).content, preparedMessages.at(-1)?.content);
+});
+
+test("execution plan creation enforces tools.initial negotiation and catches plan.tool-negotiation mismatch", () => {
+	const req = request();
+	const tools: SubagentBackendTool[] = [
+		{ id: "analyze-id", name: "analyze", effects: [] },
+		{ id: "format-id", name: "format", effects: [] },
+	];
+	const pf = preflight({ toolCatalog: tools });
+
+	// Stack with tools.initial: ["analyze"]
+	const snapInitial = structuredClone(snapshot());
+	snapInitial.promptStack = {
+		id: "worker",
+		tools: { allow: ["*"], initial: ["analyze"] },
+	};
+	snapInitial.promptStackFingerprint = subagentPromptStackFingerprint(snapInitial.promptStack);
+
+	const preparedMessages = appendProtectedSubagentTask([], req.input);
+
+	// Matching preparation: effective tools is ["analyze"]
+	const matchedPlan = createAgentExecutionPlan({
+		runId: "run-initial-match",
+		request: req,
+		snapshot: snapInitial,
+		preflight: pf,
+		preparation: {
+			systemPrompt: "compiled",
+			messages: preparedMessages,
+			toolNegotiation: {
+				effectiveToolIds: ["analyze-id"],
+				effectiveToolNames: ["analyze"],
+				stackSelectedToolNames: ["analyze"],
+				unmatchedAllowPatterns: [],
+				diagnostics: [],
+			},
+			diagnostics: [],
+		},
+		runtime: preparationRuntime(),
+		conversationFingerprint: CONVERSATION_DIGEST,
+		executionFingerprint: EXECUTION_DIGEST,
+	});
+	assert.equal(hasSubagentErrors(matchedPlan.diagnostics), false);
+	assert.ok(matchedPlan.plan);
+	assert.deepEqual(matchedPlan.plan.effectiveToolIds, ["analyze-id"]);
+
+	// Mismatched preparation (e.g. host preparation returned all tools instead of initial)
+	const mismatchedPlan = createAgentExecutionPlan({
+		runId: "run-initial-mismatch",
+		request: req,
+		snapshot: snapInitial,
+		preflight: pf,
+		preparation: {
+			systemPrompt: "compiled",
+			messages: preparedMessages,
+			toolNegotiation: {
+				effectiveToolIds: ["analyze-id", "format-id"],
+				effectiveToolNames: ["analyze", "format"],
+				stackSelectedToolNames: ["analyze", "format"],
+				unmatchedAllowPatterns: [],
+				diagnostics: [],
+			},
+			diagnostics: [],
+		},
+		runtime: preparationRuntime(),
+		conversationFingerprint: CONVERSATION_DIGEST,
+		executionFingerprint: EXECUTION_DIGEST,
+	});
+	assert.equal(mismatchedPlan.plan, undefined);
+	assert.ok(mismatchedPlan.diagnostics.some((d) => d.code === "plan.tool-negotiation"));
+
+	// Empty initial tools: tools.initial: []
+	const snapEmpty = structuredClone(snapshot());
+	snapEmpty.promptStack = {
+		id: "worker",
+		tools: { allow: ["*"], initial: [] },
+	};
+	snapEmpty.promptStackFingerprint = subagentPromptStackFingerprint(snapEmpty.promptStack);
+
+	const emptyPlan = createAgentExecutionPlan({
+		runId: "run-initial-empty",
+		request: req,
+		snapshot: snapEmpty,
+		preflight: pf,
+		preparation: {
+			systemPrompt: "compiled",
+			messages: preparedMessages,
+			toolNegotiation: {
+				effectiveToolIds: [],
+				effectiveToolNames: [],
+				stackSelectedToolNames: [],
+				unmatchedAllowPatterns: [],
+				diagnostics: [],
+			},
+			diagnostics: [],
+		},
+		runtime: preparationRuntime(),
+		conversationFingerprint: CONVERSATION_DIGEST,
+		executionFingerprint: EXECUTION_DIGEST,
+	});
+	assert.equal(hasSubagentErrors(emptyPlan.diagnostics), false);
+	assert.ok(emptyPlan.plan);
+	assert.deepEqual(emptyPlan.plan.effectiveToolIds, []);
 });
 
 test("response validation enforces every terminal status matrix", () => {
