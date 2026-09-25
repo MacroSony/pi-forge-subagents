@@ -46,10 +46,11 @@ const bus = {
 
 function makePi(name) {
 	const handlers = new Map();
+	const commands = new Map();
 	const pi = {
 		events: bus,
 		on(event, handler) { handlers.set(event, handler); },
-		registerCommand() {},
+		registerCommand(name, definition) { commands.set(name, definition); },
 		registerTool() {},
 		registerMessageRenderer() {},
 		registerShortcut() {},
@@ -61,7 +62,7 @@ function makePi(name) {
 		getModel: () => undefined,
 		appendEntry() {},
 	};
-	return { pi, handlers };
+	return { pi, handlers, commands };
 }
 
 function makeCtx(cwd) {
@@ -107,6 +108,16 @@ const optionalCtx = optionalModule.default(optionalHost.pi);
 // optional extension connects its session over the shared bus.
 await mainHost.handlers.get("session_start")({ reason: "new" }, makeCtx(cwd));
 await optionalHost.handlers.get("session_start")({ reason: "new" }, makeCtx(cwd));
+
+if (optionalHost.commands.has("forge")) throw new Error("optional must not register /forge");
+const forge = mainHost.commands.get("forge");
+if (!forge) throw new Error("main /forge command missing");
+if (!mainHost.commands.has("instruction") || mainHost.commands.get("instruction").handler !== mainHost.commands.get("system-update").handler) throw new Error("instruction alias mismatch");
+const rootCompletions = await forge.getArgumentCompletions("sub");
+if (!rootCompletions.some(item => item.value === "subagent")) throw new Error("packed optional contribution not discovered");
+const nestedCompletions = await forge.getArgumentCompletions("subagent p");
+if (!nestedCompletions.some(item => item.value === "subagent plan")) throw new Error("nested packed completion missing");
+await forge.handler("subagent help", makeCtx(cwd));
 
 const session = optionalCtx.session;
 if (!session) throw new Error("optional extension did not establish a host session");

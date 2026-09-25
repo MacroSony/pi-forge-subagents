@@ -36,8 +36,12 @@ export interface ForgeSubagentsExtensionContext {
  */
 export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtensionContext {
 	let session: ForgeHostSession | undefined;
+	let currentContext: any;
+	let lifecycleGeneration = 0;
+	let disposed = false;
 	let settingsContribution: UiContributionProvider | undefined;
 	let settingsContributionContext: any;
+	let unregisterForgeAgent: (() => void) | undefined;
 	const runtime = createForgeSubagentRuntime(() => session);
 
 	function startSettingsContribution(ctx: any): void {
@@ -57,14 +61,62 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 		settingsContributionContext = undefined;
 	}
 
+	function startForgeAgentCommand(): void {
+		unregisterForgeAgent?.();
+		unregisterForgeAgent = registerForgeAgentCommand(
+			pi,
+			runtime,
+			() => session,
+			() => currentContext,
+		);
+	}
+
+	function stopForgeAgentCommand(): void {
+		unregisterForgeAgent?.();
+		unregisterForgeAgent = undefined;
+	}
+
 	pi.on("session_start", async (_event: unknown, ctx: any) => {
+		if (disposed) return;
+		const generation = ++lifecycleGeneration;
+		currentContext = ctx;
+		stopForgeAgentCommand();
+		stopSettingsContribution();
 		session?.dispose();
-		session = await ForgeHostSession.connect(pi.events as never);
+		session = undefined;
+		let connected: ForgeHostSession;
+		try { connected = await ForgeHostSession.connect(pi.events as never); }
+		catch (error) { if (generation === lifecycleGeneration && !disposed) throw error; else return; }
+		const isCurrent = () => generation === lifecycleGeneration && !disposed;
+		if (!isCurrent()) { connected.dispose(); return; }
+		session = connected;
 		startSettingsContribution(ctx);
-		await refreshToolDescription(ctx);
+		await refreshToolDescription(ctx, isCurrent);
+		if (!isCurrent()) return;
+		startForgeAgentCommand();
+	});
+
+	pi.on("session_tree", async (_event: unknown, ctx: any) => {
+		currentContext = ctx;
+	});
+
+	pi.on("session_compact", async (_event: unknown, ctx: any) => {
+		currentContext = ctx;
+	});
+
+	pi.on("session_before_switch", async (_event, ctx) => {
+		// Switching may be cancelled. Retain the valid current context until session_start replaces it.
+		if (ctx) currentContext = ctx;
+	});
+
+	pi.on("session_before_fork", async (_event, ctx) => {
+		if (ctx) currentContext = ctx;
 	});
 
 	pi.on("session_shutdown", async () => {
+		lifecycleGeneration++;
+		stopForgeAgentCommand();
+		currentContext = undefined;
 		session?.dispose();
 		session = undefined;
 		stopSettingsContribution();
@@ -72,14 +124,25 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 	});
 
 	pi.registerCommand("subagent", {
-		description: "List Forge profiles and prepare delegated prompts through the active pi-forge host.",
+		description: "Legacy host smoke test helper: list Forge profiles and prepare delegated prompts without provider transport.",
+		getArgumentCompletions: (prefix) => {
+			const trimmed = prefix.trimStart();
+			if (!trimmed.includes(" ")) {
+				return ["help", "list", "plan"].filter((cmd) => cmd.startsWith(trimmed)).map((cmd) => ({ value: cmd, label: cmd }));
+			}
+			return null;
+		},
 		handler: async (args: string, ctx) => {
+			const trimmed = args.trim();
+			const [command = "list", ...rest] = trimmed ? trimmed.split(/\s+/) : ["list"];
+			if (command === "help") {
+				ctx.ui.notify("Legacy host smoke test helper: /subagent list | plan <profile> [task]. For real subagent execution, use canonical /forge subagent (or /forge-agent).", "info");
+				return;
+			}
 			if (!session) {
 				ctx.ui.notify("pi-forge-subagents: no Forge host session (start a session first).", "warning");
 				return;
 			}
-			const trimmed = args.trim();
-			const [command = "list", ...rest] = trimmed ? trimmed.split(/\s+/) : ["list"];
 			if (command === "list") {
 				const profiles = await session.listProfiles();
 				ctx.ui.notify(profiles.map((profile) => `${profile.scope}:${profile.profileId}`).join("\n") || "No profiles.", "info");
@@ -100,7 +163,7 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 				ctx.ui.notify(prepared.systemPrompt || "(empty system prompt)", "info");
 				return;
 			}
-			ctx.ui.notify("Usage: /subagent list | plan <profile> [task]", "info");
+			ctx.ui.notify("Usage: /subagent list | plan <profile> [task] (legacy smoke helper; use canonical /forge subagent or /forge-agent for real execution)", "info");
 		},
 	});
 
@@ -121,13 +184,17 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 			return renderEmbeddedSummaryText(enabled);
 		},
 	});
-	registerForgeAgentCommand(pi, runtime, () => session);
+	startForgeAgentCommand();
 
 	return {
 		get session() {
 			return session;
 		},
 		dispose() {
+			disposed = true;
+			lifecycleGeneration++;
+			stopForgeAgentCommand();
+			currentContext = undefined;
 			settingsContribution?.stop();
 			settingsContribution = undefined;
 			settingsContributionContext = undefined;

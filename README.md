@@ -4,7 +4,7 @@ Optional subagent integration for [pi-forge](https://github.com/MacroSony/pi-for
 Discovers the active main `pi-forge` host through the versioned
 `@zihanw/pi-forge/subagent` host port and owns subagent execution and config.
 
-This package depends only on the published host-port contract — resource
+This package uses intentional public contracts only (the host port, settings UI contribution port, and local command-contribution entry) — resource
 selectors, prompt-compilation access facts, and backend facts in; immutable
 preparation artifacts out. It never imports main-package internals.
 
@@ -12,15 +12,20 @@ preparation artifacts out. It never imports main-package internals.
 
 Presets with `tools.initial` require the Forge **0.5.5 development implementation** and this package's **post-0.5.3 tool-negotiation fix**. The published 0.5.3 implementation ignores `initial` during plan validation and is not compatible with such Presets. Use matching local checkouts until the paired releases are available. Omitted `initial` retains legacy selection; `[]` means no default tools, and allow/deny plus request access still constrain execution.
 
+The new `/forge subagent` lane additionally imports `@zihanw/pi-forge/command-contribution`, which requires the matching main development build; older published main packages do not expose this entry. The existing dependency range is not a compatibility guarantee until the coordinated release floor is updated.
+
+For CLI `plan/run`, put `--backend` before the task. Use `--` before task text containing literal flags; internal task whitespace and quotes are preserved, not interpreted by a shell. Legacy `/forge-agent` shares this parser.
+
 The next paired release is planned as Forge **0.5.5** / subagents **0.5.4**. Before publishing, raise this package's Forge dependency floor to **0.5.5**, update lockfiles/dev SDK pins, and rerun cross-package and packed execution tests. Current development manifest versions/ranges have not yet been bumped and must not be read as certification of older combinations. The packed check now exercises actual `initial` preparation, plan validation, and inert execution with both read and write otherwise available.
 
 ## Surfaces
 
 - `forge_subagent_profiles`: model-callable, no-egress discovery of enabled profiles.
 - `forge_subagent`: model-callable foreground delegation with approval.
-- `/forge-agent backends|plan|run`: human command surface for backend discovery,
-  dry planning, and approved execution.
-- `/subagent list|plan`: minimal host-port smoke surface.
+- `/forge subagent help|list|backends|config|plan|run`: canonical human command lane
+  contributed directly to `/forge` for profile discovery, dry planning, and approved execution.
+  A compatible `/forge-agent` command is also registered directly.
+- `/subagent list|plan`: legacy minimal host-port smoke surface (does not execute runtime).
 
 Subagent configuration lives in `.pi/forge/subagents.json` (project) and
 `~/.pi/forge/subagents.json` (global). Legacy `config.json.subagents` is accepted

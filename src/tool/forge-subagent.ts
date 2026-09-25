@@ -153,7 +153,7 @@ export function registerForgeSubagentTool(
 	pi: ExtensionAPI,
 	runtime: ForgeSubagentRuntime,
 	options: ForgeSubagentToolRegistrationOptions,
-): (ctx: ExtensionContext) => Promise<void> {
+): (ctx: ExtensionContext, isCurrent?: () => boolean) => Promise<void> {
 	let lastSummary: string | undefined;
 
 	function register(embedded?: string) {
@@ -345,7 +345,8 @@ export function registerForgeSubagentTool(
 		});
 	}
 
-	async function refresh(ctx: ExtensionContext): Promise<void> {
+	async function refresh(ctx: ExtensionContext, isCurrent: () => boolean = () => true): Promise<void> {
+		if (!isCurrent()) return;
 		let summary: string | undefined;
 		let failed = false;
 		try {
@@ -354,6 +355,8 @@ export function registerForgeSubagentTool(
 			failed = true;
 			summary = undefined;
 		}
+		// A session may have shut down/replaced while the catalog lookup was pending.
+		if (!isCurrent()) return;
 		// Keep the last good embedded summary when a transient catalog failure occurs.
 		if (failed && lastSummary !== undefined) return;
 		if (summary === lastSummary) return;

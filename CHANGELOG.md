@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Contribute the canonical `/forge subagent` command lane to `/forge` via `contributeForgeCommand` while keeping `/forge-agent` compatible and preserving the legacy `/subagent` smoke helper.
+- Add `list` subcommand to `/forge subagent` and `/forge-agent` listing only enabled configured profiles (execution still revalidates eligibility) with scoped IDs and descriptions with no LLM inference.
+- Tighten CLI parsing: reject extra arguments and unknown options; place `--backend` before task text, and use `--` for literal task flags (also on the legacy alias).
+- Support `--` task delimiter for `plan` and `run` to permit literal flags in delegated tasks while preserving whitespace and quotes without shell execution.
+- Argument completions for subcommands (`help`, `list`, etc.), current profile IDs, `--backend`, and registered backend IDs (including `--backend=` and flags before profile), with session-event context tracking that prevents cwd leakage across session switches.
 - Honor `tools.initial` in independent tool negotiation and execution-plan validation, including explicit empty selection, missing names, policy ceilings and access filtering. The plan integrity check remains enforced.
 - Exercise the real public Forge prepare → optional plan → inert backend execution path in both cross-package regression and packed-install tests. Both registered read/write tools are otherwise accessible so access filtering cannot hide this regression.
 - Document the matching-development-build requirement and coordinated Forge 0.5.5 / subagents 0.5.4 release gate. Manifest bumps and publishing remain separate.
