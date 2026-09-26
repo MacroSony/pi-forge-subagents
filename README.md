@@ -18,6 +18,25 @@ For CLI `plan/run`, put `--backend` before the task. Use `--` before task text c
 
 The next paired release is planned as Forge **0.5.5** / subagents **0.5.4**. Before publishing, raise this package's Forge dependency floor to **0.5.5**, update lockfiles/dev SDK pins, and rerun cross-package and packed execution tests. Current development manifest versions/ranges have not yet been bumped and must not be read as certification of older combinations. The packed check now exercises actual `initial` preparation, plan validation, and inert execution with both read and write otherwise available.
 
+### Nested usage
+
+The final `forge_subagent` tool result preserves the runtime's `response.usage` in
+`details.response.usage` and, when request coverage is available, adds the main
+Forge public `/subagent` contract at `details.forgeNestedUsage` (schema version
+1). The nested receipt includes `requests`, `input`, and `output`; `cacheRead`
+and `cacheWrite` are included only when cache coverage is complete. Mixed
+coverage omits that pair so the UI can display cache as unknown. A legacy
+runtime without request coverage is retained but receives no invented nested
+request count. A top-level native Pi `usage` is emitted only for complete,
+consistent token/cost coverage; partial or invalid values are never padded with
+zeros.
+
+This mapping requires a compatible development build of the Forge host and
+`@zihanw/pi-subagent-runtime` usage contract. The published beta.4 runtime is
+accepted defensively: without its coverage metadata the run completes without
+native or nested attribution. Full compatibility with older runtimes is not
+promised.
+
 ## Surfaces
 
 - `forge_subagent_profiles`: model-callable, no-egress discovery of enabled profiles.

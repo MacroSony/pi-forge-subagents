@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Map complete subagent runtime usage to native Pi tool usage and the main Forge public `/subagent` nested-usage v1 receipt. Runtime response usage remains preserved in details; incomplete, mixed, legacy, or invalid coverage is reported without fabricated zeros or partial native fields. This requires the compatible development Forge/runtime pair; published runtime beta.4 degrades gracefully without native/nested attribution when coverage is unavailable.
 - Contribute the canonical `/forge subagent` command lane to `/forge` via `contributeForgeCommand` while keeping `/forge-agent` compatible and preserving the legacy `/subagent` smoke helper.
 - Add `list` subcommand to `/forge subagent` and `/forge-agent` listing only enabled configured profiles (execution still revalidates eligibility) with scoped IDs and descriptions with no LLM inference.
 - Tighten CLI parsing: reject extra arguments and unknown options; place `--backend` before task text, and use `--` for literal task flags (also on the legacy alias).

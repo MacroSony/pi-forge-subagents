@@ -4,6 +4,8 @@ import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext, type Theme 
 import { Type } from "typebox";
 import type { AgentResponse, SubagentDiagnostic } from "../contract/index.ts";
 import type { ForgeSubagentPreparedRun, ForgeSubagentRuntime, SubagentBackendExecutionUpdate } from "../runtime/subagent-runtime.ts";
+import { mapForgeSubagentResponseUsage } from "./forge-subagent-usage.ts";
+import type { ForgeNestedUsage } from "@zihanw/pi-forge/subagent";
 import { canonicalDelegationProfileId, loadForgeSubagentSettings, profileAuthorizationHint, resolveSubagentProfilePolicy } from "../config/subagents.ts";
 import type { ForgeHostSession } from "../host/session.ts";
 
@@ -53,6 +55,8 @@ export interface ForgeSubagentToolDetails {
 	diagnostics: SubagentDiagnostic[];
 	progress: SubagentBackendExecutionUpdate[];
 	response?: AgentResponse;
+	/** Optional v1 nested model-usage receipt consumed by the main Forge host. */
+	forgeNestedUsage?: ForgeNestedUsage;
 }
 
 export interface ForgeSubagentApprovalResult {
@@ -294,11 +298,13 @@ export function registerForgeSubagentTool(
 					});
 					const ranWithNoTools = prepared.plan.effectiveToolIds.length === 0;
 					prepared = undefined;
+					const mappedUsage = mapForgeSubagentResponseUsage(response);
 					const finalDetails: ForgeSubagentToolDetails = {
 						...running,
 						status: response.status,
 						progress: [...progress],
 						response,
+						...(mappedUsage.nested ? { forgeNestedUsage: mappedUsage.nested } : {}),
 					};
 					// Unattended runs have no approval dialog, so surface the plan
 					// diagnostics that explain the effective tool set (or its absence)
@@ -316,7 +322,11 @@ export function registerForgeSubagentTool(
 					const outputText = response.status === "failed"
 						? `Subagent failed: ${JSON.stringify(response.error ?? {})}`
 						: response.output?.text ?? `(no output; final status: ${response.status})`;
-					return { content: toolContent([outputText, ...notes].join("\n\n")), details: finalDetails };
+					return {
+						content: toolContent([outputText, ...notes].join("\n\n")),
+						details: finalDetails,
+						...(mappedUsage.native ? { usage: mappedUsage.native } : {}),
+					};
 				} catch (error) {
 					if (prepared) await runtime.discard(prepared).catch(() => undefined);
 					if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
