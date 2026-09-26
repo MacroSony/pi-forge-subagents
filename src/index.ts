@@ -5,6 +5,8 @@ import { ForgeHostSession } from "./host/session.ts";
 import { createForgeSubagentRuntime } from "./runtime/subagent-runtime.ts";
 import { registerForgeAgentCommand } from "./command/forge-agent.ts";
 import { registerForgeSubagentTool } from "./tool/forge-subagent.ts";
+import { registerForgeSubagentTaskTool } from "./tool/forge-subagent-task.ts";
+import { backgroundTasksFor } from "./runtime/background-tasks.ts";
 import { canonicalProfileId, registerForgeSubagentProfilesTool, renderEmbeddedSummaryText, summarizeProfile } from "./tool/forge-subagent-profiles.ts";
 import { loadForgeSubagentSettings, resolveSubagentProfilePolicy } from "./config/subagents.ts";
 import { createForgeSubagentSettingsContribution } from "./ui-contribution/subagent-settings-contribution.ts";
@@ -14,6 +16,7 @@ export type { ForgeHostSessionOptions } from "./host/session.ts";
 export { createForgeSubagentRuntime } from "./runtime/subagent-runtime.ts";
 export type { ForgeSubagentPreparedRun, ForgeSubagentRuntime, ForgeSubagentPreparationResult } from "./runtime/subagent-runtime.ts";
 export { registerForgeSubagentTool } from "./tool/forge-subagent.ts";
+export { registerForgeSubagentTaskTool } from "./tool/forge-subagent-task.ts";
 export type { ForgeSubagentToolDetails, ForgeSubagentApprovalReceipt } from "./tool/forge-subagent.ts";
 export { registerForgeSubagentProfilesTool } from "./tool/forge-subagent-profiles.ts";
 export type { ForgeSubagentProfileSummary, ForgeSubagentProfilesToolDetails } from "./tool/forge-subagent-profiles.ts";
@@ -79,6 +82,8 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 	pi.on("session_start", async (_event: unknown, ctx: any) => {
 		if (disposed) return;
 		const generation = ++lifecycleGeneration;
+		backgroundTasksFor(runtime).clear();
+		const cleanup = runtime.dispose();
 		currentContext = ctx;
 		stopForgeAgentCommand();
 		stopSettingsContribution();
@@ -87,6 +92,7 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 		let connected: ForgeHostSession;
 		try { connected = await ForgeHostSession.connect(pi.events as never); }
 		catch (error) { if (generation === lifecycleGeneration && !disposed) throw error; else return; }
+		await cleanup;
 		const isCurrent = () => generation === lifecycleGeneration && !disposed;
 		if (!isCurrent()) { connected.dispose(); return; }
 		session = connected;
@@ -115,6 +121,7 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 
 	pi.on("session_shutdown", async () => {
 		lifecycleGeneration++;
+		backgroundTasksFor(runtime).clear();
 		stopForgeAgentCommand();
 		currentContext = undefined;
 		session?.dispose();
@@ -168,6 +175,7 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 	});
 
 	registerForgeSubagentProfilesTool(pi, () => session);
+	registerForgeSubagentTaskTool(pi, runtime, () => session);
 	const refreshToolDescription = registerForgeSubagentTool(pi, runtime, {
 		sessionProvider: () => session,
 		summarize: async (ctx) => {
@@ -192,6 +200,7 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 		},
 		dispose() {
 			disposed = true;
+			backgroundTasksFor(runtime).clear();
 			lifecycleGeneration++;
 			stopForgeAgentCommand();
 			currentContext = undefined;

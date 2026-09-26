@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, symlinkSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ForgePrepareRequest, ForgePrepareResponse } from "@zihanw/pi-forge/subagent";
 import { negotiateSubagentTools, subagentPromptStackFingerprint, subagentSourceProfileFingerprint, type AgentProfileSnapshot, type SubagentDiagnostic } from "../src/contract/index.ts";
@@ -295,4 +296,45 @@ test("runtime registers the opt-in Bubblewrap write backend", async () => {
 	} finally {
 		await runtime.dispose();
 	}
+});
+
+
+test("approval rechecks cwd, trust and config after an awaited profile lookup", async (t) => {
+	for (const mutation of ["disable", "trust", "symlink"] as const) await t.test(mutation, async () => {
+		const cwd = mkdtempSync(join(tmpdir(), "forge-approval-race-"));
+		const a = join(cwd, "a"), b = join(cwd, "b"), link = join(cwd, "target");
+		mkdirSync(a); mkdirSync(b); symlinkSync(a, link, "junction");
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		const config = join(cwd, ".pi", "forge", "subagents.json");
+		const writeEnabled = (enabled: boolean) => writeFileSync(config, JSON.stringify({
+			allowAgentInvocationWithoutApproval: false,
+			profiles: { "project:worker": { enabled } },
+		}));
+		writeEnabled(true);
+		let release!: () => void, reached!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		const lookupReached = new Promise<void>((resolve) => { reached = resolve; });
+		let delay = false, trusted = true;
+		const host = fakeSession();
+		const resolveProfile = host.resolveProfile.bind(host);
+		host.resolveProfile = async (...args) => { if (delay) { reached(); await gate; } return resolveProfile(...args); };
+		const backend = new DeterministicFakeBackend({ id: "fake-test-backend", fidelity: "backend-assisted" });
+		const runtime = createForgeSubagentRuntime(() => host, { builtInBackends: false, extraBackends: [backend], intentToolCatalog: [{ id: "tool.read", name: "read", effects: ["filesystem-read"] }] });
+		const ctx = { ...fakeCtx(), cwd, isProjectTrusted: () => trusted };
+		try {
+			const preparation = await runtime.prepare("project:worker", "Review the patch.", ctx, { backendId: backend.descriptor.id, cwd: link, unattended: false });
+			assert.equal(preparation.ok, true);
+			if (!preparation.ok) return;
+			delay = true;
+			const pending = runtime.execute(preparation.prepared, ctx);
+			await lookupReached;
+			if (mutation === "disable") writeEnabled(false);
+			if (mutation === "trust") trusted = false;
+			if (mutation === "symlink") { unlinkSync(link); symlinkSync(b, link, "junction"); }
+			release();
+			await assert.rejects(pending, /no longer enabled|trust was revoked|realpath changed/);
+			assert.equal(backend.startCalls.length, 0, "no backend execution after revocation/drift");
+			await runtime.discard(preparation.prepared);
+		} finally { release(); await runtime.dispose(); rmSync(cwd, { recursive: true, force: true }); }
+	});
 });

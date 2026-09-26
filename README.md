@@ -41,8 +41,9 @@ promised.
 
 - `forge_subagent_profiles`: model-callable, no-egress discovery of enabled profiles.
 - `forge_subagent`: model-callable foreground delegation with approval.
-- `/forge subagent help|list|backends|config|plan|run`: canonical human command lane
-  contributed directly to `/forge` for profile discovery, dry planning, and approved execution.
+- `/forge subagent help|list|backends|config|plan|run|status|result|cancel|release`: canonical human command lane
+  contributed directly to `/forge` for profile discovery, dry planning, approved execution (foreground or background),
+  background task management, and child continuation lifecycle.
   A compatible `/forge-agent` command is also registered directly.
 - `/subagent list|plan`: legacy minimal host-port smoke surface (does not execute runtime).
 
@@ -107,6 +108,78 @@ the live Forge profile catalog for its profile picker, and treats empty values
 as removal of that scope's override. New entries for missing profiles are
 rejected; previously configured missing or legacy entries remain visible so
 they can be removed or migrated.
+
+## CLI usage and features
+
+Both `/forge subagent` (canonical) and `/forge-agent` (compatible alias) provide
+the human subagent command interface.
+
+### Subcommands
+
+```sh
+# Discovery and configuration
+/forge subagent help
+/forge subagent list
+/forge subagent backends
+/forge subagent config
+
+# Dry planning (validates full delegated request without provider transport)
+/forge subagent plan <profile> [--backend <id>] [--cwd <path>] [--keep-context] [--continue <id>] [--] <task>
+
+# Execution (requires interactive human approval)
+/forge subagent run <profile> [--backend <id>] [--cwd <path>] [--keep-context] [--continue <id>] [--background] [--] <task>
+
+# Background task management
+/forge subagent status [id]
+/forge subagent result <id>
+/forge subagent cancel <id>
+
+# In-process session continuation release
+/forge subagent release <continueId>
+```
+
+### Options
+
+- `--backend <id>`, `--backend=<id>`: Select an execution backend before the task.
+- `--cwd <path>`, `--cwd=<path>`: Specify the target working directory for the subagent run. Quoted paths with spaces (e.g. `--cwd "/path with spaces/project"`) are fully supported.
+- `--keep-context`: Retain the child session in memory after a successful turn for subsequent continuation turns.
+- `--continue <id>`, `--continue=<id>`: Continue a previously retained in-process child session. Specifying `--continue` automatically implies context retention (`keepContext: true`).
+- `--background`: Launch the subagent in the background after explicit interactive human approval (`run` only; rejected for `plan`).
+- `--`: Delimiter marking the beginning of the task text. Preserves literal flags, whitespace, and quotes without shell interpretation.
+
+Model tools expose the same options as `cwd`, `keepContext`, `continueId`, and
+`background` on `forge_subagent`. Use `forge_subagent_task` with `action`
+`status` / `result` / `cancel` and a run `id`, or `release` and a continuation
+`id`. These are new tool schemas: use matching development runtime + optional
+builds and restart/reload the test host before trying them. Published beta.4
+runtime rejects context retention explicitly rather than pretending to resume.
+
+### In-process continuation lifecycle
+
+- **Backend restriction**: In-process child session continuation (`--keep-context`, `--continue`, and `release`) is supported only on the `pi-inprocess` backend. `pi-bwrap-write` and fresh-process backends do not support session continuation.
+- **Parent lifetime**: Continuation handles are stored in the host parent process memory and are strictly private to the owning parent session. They do not survive host session reloads, session switches/forks that create a new session, or process restarts. Navigating branches within the same session does not clone the child: a handle still refers to one serialized conversation.
+- **Full context, no automatic summary**: Retained children disable automatic compaction in memory; if context limits are reached, start a new child instead of silently replacing history with a summary. Model/tool/profile/system changes require a new child.
+- **Explicit release**: To free memory before session exit, invoke `/forge subagent release <continueId>`.
+
+### Target working directory (`--cwd`)
+
+- **Interactive verification**: In CLI runs, the target working directory is displayed and bound to the interactive human approval dialog before execution.
+- **External unattended access**: When subagents are invoked in unattended mode (`allowAgentInvocationWithoutApproval: true`), targeting an external directory requires exact canonical path authorization in `allowedWorkingDirectories` in the trusted parent `.pi/forge/subagents.json`.
+- **Allowlist precedence**: Project `allowedWorkingDirectories` replaces the global list; `[]` revokes external targets. Relative project paths are resolved from the parent cwd, global paths from the global Forge config directory. This is an explicit exact-directory list, not a recursive filesystem grant.
+- **Isolation**: Subagent runs targeting an external working directory use parent Forge profiles and delegation authorization; target directory `.pi/forge/` profiles, local extensions, skills and context files are **not** auto-loaded by the child. Native SDK project settings may still be read from the target; these do not grant additional Forge delegation permissions.
+
+### Background tasks and usage accounting
+
+- **Approval before launch**: Background tasks use the same approval policy as foreground runs. CLI execution always asks; model tools may use explicitly trusted unattended configuration.
+- **No injected followups**: Launching a background task does not inject automatic assistant messages into the ongoing chat.
+- **Non-claiming inspection**: `/forge subagent result <id>` reads results with `claimUsage=false`. Human inspection never steals token or cost accounting from subsequent model-directed tool collection.
+- **Result ownership**: Model-tool collection uses `forge_subagent_task` (`action: "result"`, `id: <runId>`), is allowed only on the launch branch or its descendant, and credits usage once per task. Repeated reads return output without another receipt.
+- **No CLI ledger**: Native Pi model usage is credited solely through model tool-result collection; the CLI does not maintain a duplicate usage accounting ledger.
+
+### Cancellation semantics
+
+- **Foreground**: Respects the turn abort signal (`ctx.signal` / Ctrl+C / abort).
+- **Background**: Continues running across parent conversation turns; cancel explicitly with `/forge subagent cancel <id>` or let it terminate automatically on parent session shutdown.
 
 ## Development
 

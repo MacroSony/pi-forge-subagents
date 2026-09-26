@@ -112,7 +112,7 @@ await optionalHost.handlers.get("session_start")({ reason: "new" }, makeCtx(cwd)
 if (optionalHost.commands.has("forge")) throw new Error("optional must not register /forge");
 const forge = mainHost.commands.get("forge");
 if (!forge) throw new Error("main /forge command missing");
-if (!mainHost.commands.has("instruction")) throw new Error("packed /instruction command missing");
+if (!mainHost.commands.has("capability")) throw new Error("packed /capability command missing");
 const rootCompletions = await forge.getArgumentCompletions("sub");
 if (!rootCompletions.some(item => item.value === "subagent")) throw new Error("packed optional contribution not discovered");
 const nestedCompletions = await forge.getArgumentCompletions("subagent p");

@@ -224,7 +224,7 @@ test("main-contribution dispatch metadata and lifecycle on FORGE_COMMAND_DISCOVE
 	const unregister = registerForgeAgentCommand(pi, runtime, () => undefined);
 
 	assert.ok(registeredForgeAgent, "forge-agent command must be registered");
-	assert.equal(registeredForgeAgent.description, "Plan or run a foreground human-approved agent profile");
+	assert.equal(registeredForgeAgent.description, "Plan, run, continue, or inspect human-approved subagent tasks");
 
 	// Synchronous parent discovery via FORGE_COMMAND_DISCOVERY_EVENT
 	const discovered: ForgeCommandContribution[] = [];

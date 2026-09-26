@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -22,6 +22,7 @@ export interface ForgeSubagentSettings {
 	allowAgentInvocationWithoutApproval?: boolean;
 	summaryInToolDescription?: boolean;
 	summaryInToolDescriptionSource?: "project" | "global";
+	allowedWorkingDirectories?: string[];
 	profiles: Record<string, ForgeSubagentProfileSettings>;
 	/** File provenance per profile entry key: which config file last defined it. */
 	profilesSource: Record<string, "project" | "global">;
@@ -73,20 +74,22 @@ export function loadForgeSubagentSettings(ctx: ExtensionContext): ForgeSubagentS
 	// Legacy config.json.subagents is read-only fallback material. Dedicated
 	// subagents.json values win over legacy values. To keep legacy as a true
 	// fallback, apply all legacy sections before any dedicated section.
+	const globalBase = process.env.PI_FORGE_GLOBAL_DIR ?? join(process.env.PI_FORGE_GLOBAL_FORGE_DIR ?? homedir(), ".pi", "forge");
+
 	const globalLegacy = readLegacySubagentsSection(globalLegacyForgeConfigPath(), settings.warnings);
-	if (globalLegacy) applySection(globalLegacy, "global", settings);
+	if (globalLegacy) applySection(globalLegacy, "global", settings, globalBase);
 
 	const projectLegacy = ctx.isProjectTrusted()
 		? readLegacySubagentsSection(projectLegacyForgeConfigPath(ctx.cwd), settings.warnings)
 		: undefined;
-	if (projectLegacy) applySection(projectLegacy, "project", settings);
+	if (projectLegacy) applySection(projectLegacy, "project", settings, ctx.cwd);
 
 	const global = readConfigFile(globalSubagentsConfigPath(), settings.warnings);
-	if (global) applySection(global, "global", settings);
+	if (global) applySection(global, "global", settings, globalBase);
 
 	if (ctx.isProjectTrusted()) {
 		const project = readConfigFile(projectSubagentsConfigPath(ctx.cwd), settings.warnings);
-		if (project) applySection(project, "project", settings);
+		if (project) applySection(project, "project", settings, ctx.cwd);
 	} else {
 		settings.warnings.push("pi-forge-subagents: project is not trusted; project subagents.json and config.json.subagents settings are ignored.");
 	}
@@ -129,6 +132,28 @@ export function canonicalDelegationProfileId(profileId: string): string {
 	return profileId.startsWith("project:") || profileId.startsWith("global:")
 		? profileId
 		: `project:${profileId}`;
+}
+
+export function isAllowedWorkingDirectory(
+	settings: ForgeSubagentSettings,
+	targetCwd: string,
+	parentCwd: string,
+): boolean {
+	let canonicalTarget: string;
+	try {
+		canonicalTarget = realpathSync(targetCwd);
+	} catch {
+		canonicalTarget = resolve(targetCwd);
+	}
+	let canonicalParent: string;
+	try {
+		canonicalParent = realpathSync(parentCwd);
+	} catch {
+		canonicalParent = resolve(parentCwd);
+	}
+	if (canonicalTarget === canonicalParent) return true;
+	const allowlist = settings.allowedWorkingDirectories ?? [];
+	return allowlist.includes(canonicalTarget);
 }
 
 function profileSettingsKey(settings: ForgeSubagentSettings, profileId: string): string | undefined {
@@ -191,7 +216,7 @@ function readLegacySubagentsSection(path: string, warnings: string[]): Record<st
 	return raw.subagents as Record<string, unknown>;
 }
 
-function applySection(raw: Record<string, unknown>, source: "project" | "global", settings: ForgeSubagentSettings): void {
+function applySection(raw: Record<string, unknown>, source: "project" | "global", settings: ForgeSubagentSettings, baseDir: string): void {
 	if (typeof raw.backend === "string" && raw.backend.trim()) {
 		settings.backend = raw.backend.trim();
 		settings.backendSource = source;
@@ -210,6 +235,39 @@ function applySection(raw: Record<string, unknown>, source: "project" | "global"
 		settings.summaryInToolDescriptionSource = source;
 	} else if (raw.summaryInToolDescription !== undefined) {
 		settings.warnings.push(`pi-forge-subagents: ${source} summaryInToolDescription must be boolean; ignored.`);
+	}
+	if (raw.allowedWorkingDirectories !== undefined) {
+		if (!Array.isArray(raw.allowedWorkingDirectories)) {
+			settings.allowedWorkingDirectories = [];
+			settings.warnings.push(`pi-forge-subagents: ${source} allowedWorkingDirectories must be an array of strings; external targets disabled.`);
+		} else {
+			const validDirs: string[] = [];
+			for (const item of raw.allowedWorkingDirectories) {
+				if (typeof item !== "string" || !item.trim()) {
+					settings.warnings.push(`pi-forge-subagents: ${source} allowedWorkingDirectories entries must be non-empty strings; ignored.`);
+					continue;
+				}
+				const trimmed = item.trim();
+				const expanded = trimmed.startsWith("~/") ? join(homedir(), trimmed.slice(2)) : trimmed;
+				const resolved = isAbsolute(expanded) ? resolve(expanded) : resolve(baseDir, expanded);
+				try {
+					const canonical = realpathSync(resolved);
+					const stat = statSync(canonical);
+					if (!stat.isDirectory()) {
+						settings.warnings.push(`pi-forge-subagents: ${source} allowedWorkingDirectories entry "${item}" is not a directory; ignored.`);
+						continue;
+					}
+					if (!validDirs.includes(canonical)) {
+						validDirs.push(canonical);
+					}
+				} catch {
+					settings.warnings.push(`pi-forge-subagents: ${source} allowedWorkingDirectories entry "${item}" is not an existing directory; ignored.`);
+				}
+			}
+			// A higher-priority explicit list replaces, rather than unions with,
+			// lower-priority grants. In particular [] can revoke global targets.
+			settings.allowedWorkingDirectories = validDirs;
+		}
 	}
 	if (raw.profiles && typeof raw.profiles === "object" && !Array.isArray(raw.profiles)) {
 		for (const [profileId, value] of Object.entries(raw.profiles as Record<string, unknown>)) {

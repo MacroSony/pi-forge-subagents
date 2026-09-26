@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add model-tool `cwd`, `keepContext`, `continueId`, and `background` options plus `forge_subagent_task` status/result/cancel/release. Background results credit native/nested usage once, and only on the launch branch or descendants.
+
+- Add CLI flags `--cwd` (supporting quoted paths), `--keep-context`, `--continue` (with implied context retention), and `--background` (run only) to `/forge subagent` and `/forge-agent`.
+- Add background task management subcommands: `status [id]`, `result <id>`, and `cancel <id>`. CLI result inspection uses `claimUsage=false` so human inspection never steals accounting from subsequent model collection, and native usage attribution remains credited solely by tool-result collection with no new CLI ledger.
+- Add `release <continueId>` subcommand to explicitly release in-process child continuation sessions. Document continuation constraints: supported only on `pi-inprocess`, private to the owning parent session process lifetime (no reload, restart, new-parent-session, or bwrap continuation).
+- Enforce that CLI invocations are always human-approved (`unattended: false` is passed to preparation even when project config allows unattended invocation).
+- Document target working directory semantics: interactive CLI mode prompts human approval for the target directory; external unattended invocation requires explicit matching entries in `allowedWorkingDirectories` from trusted parent config; target profiles/extensions are not auto-loaded.
+- Clarify cancellation semantics: foreground runs respect abort signals, while background tasks persist across parent turns until explicitly cancelled via `cancel <id>` or drained on parent session shutdown.
+- Update packed smoke test `scripts/check-packed-install.mjs` to check for `/capability` instead of `/instruction` in sync with current main naming.
 - Map complete subagent runtime usage to native Pi tool usage and the main Forge public `/subagent` nested-usage v1 receipt. Runtime response usage remains preserved in details; incomplete, mixed, legacy, or invalid coverage is reported without fabricated zeros or partial native fields. This requires the compatible development Forge/runtime pair; published runtime beta.4 degrades gracefully without native/nested attribution when coverage is unavailable.
 - Contribute the canonical `/forge subagent` command lane to `/forge` via `contributeForgeCommand` while keeping `/forge-agent` compatible and preserving the legacy `/subagent` smoke helper.
 - Add `list` subcommand to `/forge subagent` and `/forge-agent` listing only enabled configured profiles (execution still revalidates eligibility) with scoped IDs and descriptions with no LLM inference.

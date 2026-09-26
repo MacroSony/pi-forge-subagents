@@ -8,6 +8,7 @@ import { mapForgeSubagentResponseUsage } from "./forge-subagent-usage.ts";
 import type { ForgeNestedUsage } from "@zihanw/pi-forge/subagent";
 import { canonicalDelegationProfileId, loadForgeSubagentSettings, profileAuthorizationHint, resolveSubagentProfilePolicy } from "../config/subagents.ts";
 import type { ForgeHostSession } from "../host/session.ts";
+import { backgroundTasksFor } from "../runtime/background-tasks.ts";
 
 const APPROVE = "Approve and run";
 const VIEW_FULL_PROMPT = "View full prompt";
@@ -19,6 +20,10 @@ const MAX_RENDER_OUTPUT_CHARS = 2_000;
 const MAX_RENDER_PROGRESS_LINES = 8;
 
 const ForgeSubagentParameters = Type.Object({
+	cwd: Type.Optional(Type.String({ minLength: 1, description: "Target working directory. Unattended external targets require the parent allowedWorkingDirectories allowlist." })),
+	keepContext: Type.Optional(Type.Boolean({ description: "Retain the complete in-process child context until explicit release or parent session shutdown." })),
+	continueId: Type.Optional(Type.String({ minLength: 1, description: "Continue an in-process child from this parent session. Profile, model, tools and cwd must remain unchanged." })),
+	background: Type.Optional(Type.Boolean({ description: "Return after approved launch; use forge_subagent_task status/result/cancel. Parent session shutdown cancels the task." })),
 	profileId: Type.String({ minLength: 1, description: "ID of a Pi Forge agent profile enabled for subagent delegation." }),
 	task: Type.String({ minLength: 1, description: "The focused task to delegate to the subagent." }),
 	backend: Type.Optional(Type.String({ minLength: 1, description: "Backend ID to execute through (interactive runs only)." })),
@@ -55,6 +60,9 @@ export interface ForgeSubagentToolDetails {
 	diagnostics: SubagentDiagnostic[];
 	progress: SubagentBackendExecutionUpdate[];
 	response?: AgentResponse;
+	runId?: string;
+	background?: boolean;
+	cwd?: string;
 	/** Optional v1 nested model-usage receipt consumed by the main Forge host. */
 	forgeNestedUsage?: ForgeNestedUsage;
 }
@@ -91,6 +99,8 @@ export function renderApprovalSummary(prepared: ForgeSubagentPreparedRun, task: 
 	const lines = [
 		`Subagent approval: ${plan.profile.profileId}`,
 		`Task: ${task}`,
+		`Target cwd: ${prepared.cwd ?? "(parent workspace)"}`,
+		`Context: ${prepared.continueId ? `continue ${prepared.continueId}` : prepared.keepContext ? "retain new in-process child" : "one-shot"}`,
 		`Backend: ${plan.backendId}`,
 		`Model: ${plan.model.provider}/${plan.model.id}`,
 		`Thinking: ${plan.profile.profile.thinkingLevel}`,
@@ -197,7 +207,8 @@ export function registerForgeSubagentTool(
 				if (!session) {
 					return { content: toolContent("pi-forge-subagents: no Forge host session (start a session first)."), details: { ...baseDetails, status: "failed" } };
 				}
-				const policy = resolveSubagentProfilePolicy(settings, canonicalProfileId, approvalRequired ? params.backend : undefined);
+				const retained = params.continueId ? runtime.continuationInfo?.(params.continueId, ctx) : undefined;
+				const policy = resolveSubagentProfilePolicy(settings, canonicalProfileId, approvalRequired ? (params.backend ?? retained?.backendId) : undefined);
 				if (!policy.enabled) {
 					const hint = profileAuthorizationHint(settings, canonicalProfileId);
 					return {
@@ -244,6 +255,10 @@ export function registerForgeSubagentTool(
 					const preparation = await runtime.prepare(canonicalProfileId, params.task, ctx, {
 						backendId: policy.backend.id,
 						timeoutMs: policy.timeout.milliseconds,
+						unattended: !approvalRequired,
+						...(params.cwd !== undefined ? { cwd: params.cwd } : {}),
+						...(params.continueId ? { continueId: params.continueId } : {}),
+						keepContext: Boolean(params.keepContext || params.continueId),
 						...(modelOverride ? { model: modelOverride } : {}),
 					});
 					if (!preparation.ok) {
@@ -291,6 +306,15 @@ export function registerForgeSubagentTool(
 						},
 						progress,
 					};
+					if (signal?.aborted) throw new DOMException("Invocation cancelled before launch.", "AbortError");
+					if (params.background) {
+						const launched = await backgroundTasksFor(runtime).launch(prepared, ctx);
+						prepared = undefined;
+						return {
+							content: toolContent(`Background subagent launched: ${launched.id}. Use forge_subagent_task with action status/result/cancel and this id. No result or usage is credited until result collection.`),
+							details: { ...running, status: "running", runId: launched.id, background: true, cwd: launched.cwd },
+						};
+					}
 					const response = await runtime.execute(prepared, ctx, signal, (update) => {
 						progress.push(structuredClone(update));
 						if (progress.length > MAX_PROGRESS_ITEMS) progress.splice(0, progress.length - MAX_PROGRESS_ITEMS);
@@ -298,6 +322,7 @@ export function registerForgeSubagentTool(
 					});
 					const ranWithNoTools = prepared.plan.effectiveToolIds.length === 0;
 					prepared = undefined;
+					try { runtime.takeReport?.(response.runId); } catch { /* Report disposal must not lose the final usage receipt. */ }
 					const mappedUsage = mapForgeSubagentResponseUsage(response);
 					const finalDetails: ForgeSubagentToolDetails = {
 						...running,
@@ -311,6 +336,7 @@ export function registerForgeSubagentTool(
 					// directly in the tool result; otherwise a silent empty tool
 					// intersection looks like a model failure.
 					const notes: string[] = [];
+					if (response.continuationId) notes.push(`Retained child: ${response.continuationId}. Continue with the same profile and continueId; release with forge_subagent_task action release.`);
 					if (ranWithNoTools) {
 						notes.push("Warning: the subagent ran with NO tools. The intersection of the prompt-stack tool policy, the backend tool catalog, and the access preset was empty.");
 					}
@@ -389,6 +415,7 @@ function forgeSubagentToolDescription(embedded?: string): string {
 		"The child receives only backend-approved tools. Read-only process backends use the invoking user boundary; pi-bwrap-write runs isolated and directly modifies the selected git workspace.",
 		"The optional backend parameter selects the execution backend for interactively approved runs; unattended invocation always uses the configured default backend.",
 		"The optional model parameter selects the execution model (provider/id) for interactively approved runs; unattended invocation is pinned to the profile/configured model.",
+		"Use keepContext for same-parent in-process continuation, then continueId with the same profile. Use background to launch without waiting and forge_subagent_task to inspect/collect/cancel; release retained contexts explicitly. No handles survive parent session shutdown.",
 		"Use the final report as evidence and do not repeatedly request the same rejected delegation.",
 	].join(" ");
 	return embedded ? `${lines}\n\n${embedded}` : lines;

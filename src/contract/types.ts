@@ -136,6 +136,8 @@ export type SubagentPreparationRuntime = PromptRuntime;
 export type SubagentBackendCapabilities = BackendCapabilities & {
 	traceInspection: boolean;
 	artifactRetention: boolean;
+	/** True when the backend can retain an in-memory child conversation. */
+	continuation?: boolean;
 };
 
 export type SubagentBackendDescriptor = Omit<BackendDescriptor, "capabilities"> & {
@@ -347,6 +349,8 @@ export interface AgentResponseCommon {
 	artifacts: SubagentArtifactReference[];
 	trace?: SubagentTraceReference;
 	usage?: SubagentUsage;
+	/** Present when the run retained an in-memory child conversation. */
+	continuationId?: string;
 }
 
 export interface AgentResponseCompleted extends AgentResponseCommon {
