@@ -5,7 +5,27 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const mainRoot = process.env.PI_FORGE_ROOT ?? resolve(rootDir, "../pi-forge");
+// Release gate: test this package against explicit, published (or explicitly
+// supplied) artifacts. Nothing is skipped and peers resolve normally.
+//   PI_FORGE_PACKAGE / PI_SUBAGENT_RUNTIME_PACKAGE: npm spec or tarball path.
+//     Defaults are the exact floors declared in this package's dependencies.
+//   PI_FORGE_ROOT: pack a local Forge checkout instead (forward-compat probe).
+//   PI_TEST_VERSION / TYPEBOX_TEST_VERSION: host SDK family; defaults to the
+//     development pins.
+const selfManifest = JSON.parse(readFileSync(join(rootDir, "package.json"), "utf8"));
+const floor = (name) => {
+	const range = String(selfManifest.dependencies?.[name] ?? "");
+	const exact = range.replace(/^\^/, "");
+	if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?$/.test(exact)) throw new Error(`cannot derive an exact floor for ${name} from ${JSON.stringify(range)}`);
+	return `${name}@${exact}`;
+};
+const exactVersion = (label, value) => {
+	if (!/^\d+\.\d+\.\d+$/.test(String(value))) throw new Error(`${label} must be an exact x.y.z version, got ${JSON.stringify(value)}`);
+	return String(value);
+};
+const piVersion = exactVersion("PI_TEST_VERSION", process.env.PI_TEST_VERSION ?? selfManifest.devDependencies?.["@earendil-works/pi-coding-agent"]);
+const typeboxVersion = exactVersion("TYPEBOX_TEST_VERSION", process.env.TYPEBOX_TEST_VERSION ?? selfManifest.devDependencies?.typebox);
+const mainRoot = process.env.PI_FORGE_ROOT;
 const npmCli = process.env.npm_execpath;
 const npm = npmCli ? process.execPath : process.platform === "win32" ? "npm.cmd" : "npm";
 const npmPrefix = npmCli ? [npmCli] : [];
@@ -211,40 +231,43 @@ if (!rediscoveryFailed) throw new Error("host discovery unexpectedly succeeded a
 console.log("optional packed install smoke ok");
 `;
 
-if (!existsSync(mainRoot)) {
-	console.log("main pi-forge checkout not found; skipping optional packed smoke");
-	process.exit(0);
-}
 
 const tmp = mkdtempSync(join(tmpdir(), "pi-forge-subagents-packed-"));
 try {
-	// Guard the cross-repo invariant: main's committed dist must be in sync
-	// with its src, otherwise the smoke would test stale host code.
-	if (existsSync(join(mainRoot, "scripts", "check-dist.mjs"))) {
-		run(process.execPath, [join(mainRoot, "scripts", "check-dist.mjs")]);
+	let mainPackage = process.env.PI_FORGE_PACKAGE ?? floor("@zihanw/pi-forge");
+	if (mainRoot) {
+		if (!existsSync(mainRoot)) throw new Error(`PI_FORGE_ROOT does not exist: ${mainRoot}`);
+		if (existsSync(join(mainRoot, "scripts", "check-dist.mjs"))) {
+			run(process.execPath, [join(mainRoot, "scripts", "check-dist.mjs")]);
+		}
+		mainPackage = packInto(mainRoot, tmp, ["--ignore-scripts"]);
 	}
-	// Pack main from its committed dist and this package via its prepack build
-	// (dist is gitignored here).
-	const mainPack = packInto(mainRoot, tmp, ["--ignore-scripts"]);
+	const runtimePackage = process.env.PI_SUBAGENT_RUNTIME_PACKAGE ?? floor("@zihanw/pi-subagent-runtime");
+	// This package via its prepack build (dist is gitignored here).
 	const optionalPack = packInto(rootDir, tmp);
+	console.log(`Packed optional smoke: forge=${mainPackage} runtime=${runtimePackage} pi=${piVersion} typebox=${typeboxVersion}`);
 
 	const consumer = mkdtempSync(join(tmpdir(), "pi-forge-subagents-consumer-"));
 	const fixture = mkdtempSync(join(tmpdir(), "pi-forge-subagents-fixture-"));
 	try {
 		writeFileSync(join(consumer, "package.json"), JSON.stringify({ name: "smoke-optional", private: true, type: "module" }));
-		// Pin the SDK family from the packed host's peer-compatible dev versions.
-		const manifest = JSON.parse(readFileSync(join(rootDir, "package.json"), "utf8"));
-		const mainManifest = JSON.parse(readFileSync(join(mainRoot, "package.json"), "utf8"));
-		// The packed main host is the compatibility anchor. Its current peer SDK
-		// versions may be newer than this optional checkout's dev pins.
-		const pin = (name) => `${name}@${String(mainManifest.devDependencies?.[name] ?? manifest.dependencies?.[name] ?? manifest.devDependencies?.[name]).replace(/^\^/, "")}`;
-		run(npm, [...npmPrefix, "install", mainPack, optionalPack,
-			pin("@earendil-works/pi-coding-agent"),
-			pin("@earendil-works/pi-ai"),
-			pin("@earendil-works/pi-agent-core"),
-			pin("@earendil-works/pi-tui"),
-			pin("typebox"),
-			"--no-audit", "--no-fund", "--ignore-scripts", "--legacy-peer-deps"], { cwd: consumer });
+		run(npm, [...npmPrefix, "install", mainPackage, runtimePackage, optionalPack,
+			`@earendil-works/pi-coding-agent@${piVersion}`,
+			`@earendil-works/pi-ai@${piVersion}`,
+			`@earendil-works/pi-agent-core@${piVersion}`,
+			`@earendil-works/pi-tui@${piVersion}`,
+			`typebox@${typeboxVersion}`,
+			"--no-audit", "--no-fund", "--ignore-scripts"], { cwd: consumer });
+		const installed = (name) => JSON.parse(readFileSync(join(consumer, "node_modules", ...name.split("/"), "package.json"), "utf8")).version;
+		for (const name of ["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai", "@earendil-works/pi-agent-core", "@earendil-works/pi-tui"]) {
+			if (installed(name) !== piVersion) throw new Error(`${name} resolved to ${installed(name)}, expected ${piVersion}`);
+		}
+		if (installed("typebox") !== typeboxVersion) throw new Error(`typebox resolved to ${installed("typebox")}, expected ${typeboxVersion}`);
+		// TypeBox is host-provided: the optional package must not carry its own copy.
+		if (existsSync(join(consumer, "node_modules", "@zihanw", "pi-forge-subagents", "node_modules", "typebox"))) {
+			throw new Error("pi-forge-subagents installed a private typebox copy");
+		}
+		console.log(`Installed: pi-forge ${installed("@zihanw/pi-forge")}, runtime ${installed("@zihanw/pi-subagent-runtime")}, optional ${installed("@zihanw/pi-forge-subagents")}`);
 
 		// Fixture workspace: one prompt stack + one profile referencing it.
 		const projectDir = join(fixture, "project");
@@ -270,11 +293,19 @@ try {
 		writeFileSync(join(projectDir, ".pi", "forge", "subagents.json"), JSON.stringify({
 			profiles: { "project:worker": { enabled: true, backend: "fake-packed" } },
 		}));
+		const isolatedEnv = { ...process.env, HOME: fixture, USERPROFILE: fixture, PI_CODING_AGENT_DIR: join(fixture, "agent") };
 		writeFileSync(join(consumer, "smoke.mjs"), SMOKE);
 		run(process.execPath, ["smoke.mjs"], {
 			cwd: consumer,
-			env: { ...process.env, FORGE_SMOKE_CWD: projectDir, HOME: fixture },
+			env: { ...isolatedEnv, FORGE_SMOKE_CWD: projectDir },
+			timeout: 60_000,
 		});
+		writeFileSync(join(consumer, "real-chain.mjs"), readFileSync(join(rootDir, "scripts", "fixtures", "packed-real-chain.mjs")));
+		console.log(run(process.execPath, ["real-chain.mjs"], {
+			cwd: consumer,
+			env: { ...isolatedEnv, FORGE_CHAIN_CWD: join(fixture, "real-chain") },
+			timeout: 120_000,
+		}).trim());
 	} finally {
 		rmSync(consumer, { recursive: true, force: true });
 		rmSync(fixture, { recursive: true, force: true });

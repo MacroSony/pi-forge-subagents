@@ -106,9 +106,11 @@ async function loadSummarizeSessionCacheUsage(): Promise<(entries: readonly unkn
 	const exported = (publicForge as unknown as { summarizeSessionCacheUsage?: unknown }).summarizeSessionCacheUsage;
 	if (typeof exported === "function") return exported as (entries: readonly unknown[]) => any;
 	// The read-only summarizer is intentionally not a public package export.
-	// Cross-package verification uses the sibling checkout, never copies its logic.
-	const sourceForge = await import("../../pi-forge/src/session-usage.ts");
-	return sourceForge.summarizeSessionCacheUsage;
+	// Load it from the installed Forge artifact by file URL (beside the package
+	// entry point) instead of a sibling checkout; never copy its logic.
+	const entry = import.meta.resolve("@zihanw/pi-forge");
+	const installedForge = await import(new URL("./session-usage.js", entry).href);
+	return installedForge.summarizeSessionCacheUsage;
 }
 
 test("registered forge_subagent survives the real SDK loop and JSONL reload with usage", async () => {
