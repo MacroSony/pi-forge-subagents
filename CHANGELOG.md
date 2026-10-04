@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## Unreleased — 0.5.4 candidate
+
+- Require published Forge ^0.5.8 and runtime ^0.1.0-beta.5; pin development Pi SDKs to 1.0.2. TypeBox is a wildcard optional host peer with development pin 1.3.27, avoiding duplicate host-module warnings.
+- Retry generation backend cleanup at most three times and surface the final failure. This is bounded best-effort cleanup, not unconditional resource release.
+- Require continuation and usage coverage in release tests by default. Packed checks use exact published dependency floors, normal peer resolution, isolated HOME/agent directories, and real Forge + parent/child SDK sessions with an offline provider. Cover initial tools, target-relative reads, retained history, foreground/background cleanup-failure usage exactly once, and JSONL reload on Pi 0.87.0 / 1.0.2.
+- CI no longer checks out a moving sibling Forge main; usage integration loads the installed Forge artifact instead of sibling source.
 
 - Set effective `allowAgentInvocationWithoutApproval` to `false` with a warning when explicitly present as a non-boolean value (including `null`, strings `'false'`/`'true'`, numbers, and objects/arrays) at that configuration layer, rather than silently retaining a previous layer's `true`. Omitted `allowAgentInvocationWithoutApproval` continues to inherit across layers.
 - Add model-tool `cwd`, `keepContext`, `continueId`, and `background` options plus `forge_subagent_task` status/result/cancel/release. Background results credit native/nested usage once, and only on the launch branch or descendants.
@@ -20,7 +25,7 @@
 - Argument completions for subcommands (`help`, `list`, etc.), current profile IDs, `--backend`, and registered backend IDs (including `--backend=` and flags before profile), with session-event context tracking that prevents cwd leakage across session switches.
 - Honor `tools.initial` in independent tool negotiation and execution-plan validation, including explicit empty selection, missing names, policy ceilings and access filtering. The plan integrity check remains enforced.
 - Exercise the real public Forge prepare → optional plan → inert backend execution path in both cross-package regression and packed-install tests. Both registered read/write tools are otherwise accessible so access filtering cannot hide this regression.
-- Document the matching-development-build requirement and coordinated Forge 0.5.5 / subagents 0.5.4 release gate. Manifest bumps and publishing remain separate.
+- Runtime beta.5 must be published before final registry lockfile/CI validation and optional 0.5.4 publication; Forge 0.5.8 is the independent published baseline.
 
 ## 0.5.3 - 2026-09-03
 

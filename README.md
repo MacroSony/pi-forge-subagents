@@ -8,15 +8,50 @@ This package uses intentional public contracts only (the host port, settings UI 
 selectors, prompt-compilation access facts, and backend facts in; immutable
 preparation artifacts out. It never imports main-package internals.
 
-## Development compatibility
+## Compatibility and release validation
 
-Presets with `tools.initial` require the Forge **0.5.5 development implementation** and this package's **post-0.5.3 tool-negotiation fix**. The published 0.5.3 implementation ignores `initial` during plan validation and is not compatible with such Presets. Use matching local checkouts until the paired releases are available. Omitted `initial` retains legacy selection; `[]` means no default tools, and allow/deny plus request access still constrain execution.
+This 0.5.4 candidate requires **Forge ^0.5.8** and
+**pi-subagent-runtime ^0.1.0-beta.5**. The Forge host is already published;
+release the runtime before installing/publishing this optional package from
+npm. Candidate versions here do not imply registry availability.
 
-The new `/forge subagent` lane additionally imports `@zihanw/pi-forge/command-contribution`, which requires the matching main development build; older published main packages do not expose this entry. The existing dependency range is not a compatibility guarantee until the coordinated release floor is updated.
+Pi SDK packages and TypeBox are optional wildcard host peers, not bundled
+runtime dependencies. Development pins are Pi **1.0.2** and TypeBox **1.3.27**.
+The packed real-host/real-child gate also runs against Pi **0.87.0** with
+TypeBox **1.3.7**. These are tested combinations, not a claim that every Pi
+release is supported. Built-in in-process execution requires Pi's ModelRuntime
+and authenticated preparation APIs; peers alone do not certify an older host.
 
-For CLI `plan/run`, put `--backend` before the task. Use `--` before task text containing literal flags; internal task whitespace and quotes are preserved, not interpreted by a shell. Legacy `/forge-agent` shares this parser.
+`tools.initial` is honored by both the Forge compiler and runtime plan
+validation: omitted retains legacy selection, `[]` means no default tools,
+and allow/deny plus request access still constrain execution. Published
+Subagents 0.5.3 ignored `initial` in validation; upgrade both the optional
+package and runtime to use these features. `/forge subagent` uses the published
+Forge command-contribution port, not an unreleased main branch.
 
-The next paired release is planned as Forge **0.5.5** / subagents **0.5.4**. Before publishing, raise this package's Forge dependency floor to **0.5.5**, update lockfiles/dev SDK pins, and rerun cross-package and packed execution tests. Current development manifest versions/ranges have not yet been bumped and must not be read as certification of older combinations. The packed check now exercises actual `initial` preparation, plan validation, and inert execution with both read and write otherwise available.
+For CLI `plan/run`, put `--backend` before the task. Use `--` before task text
+containing literal flags; internal task whitespace and quotes are preserved,
+not interpreted by a shell. Legacy `/forge-agent` shares this parser.
+
+### Reproducible packed gate
+
+`npm run check:packed` installs this tarball against exact published Forge and
+runtime dependency floors, with normal peer resolution. It fails rather than
+skipping when a required artifact is unavailable. For pre-publication tests:
+
+```sh
+PI_SUBAGENT_RUNTIME_PACKAGE=/absolute/path/runtime.tgz npm run check:packed
+PI_TEST_VERSION=0.87.0 TYPEBOX_TEST_VERSION=1.3.7 \
+  PI_SUBAGENT_RUNTIME_PACKAGE=/absolute/path/runtime.tgz npm run check:packed
+```
+
+`PI_FORGE_PACKAGE` can select an explicit Forge tarball/spec; `PI_FORGE_ROOT`
+is a separate opt-in local-checkout probe, never the default release gate.
+The test uses an isolated HOME/agent directory, real SDK parent and child
+sessions plus the real Forge compiler, and an offline synthetic provider.
+It checks `initial: [read]` / `[]`, target-relative reads, complete retained
+history, cleanup-failure usage in foreground/background, one-time collection,
+and JSONL reload. It does not certify live-provider billing or remote CI.
 
 ### Nested usage
 
@@ -31,11 +66,10 @@ request count. A top-level native Pi `usage` is emitted only for complete,
 consistent token/cost coverage; partial or invalid values are never padded with
 zeros.
 
-This mapping requires a compatible development build of the Forge host and
-`@zihanw/pi-subagent-runtime` usage contract. The published beta.4 runtime is
-accepted defensively: without its coverage metadata the run completes without
-native or nested attribution. Full compatibility with older runtimes is not
-promised.
+This mapping requires the dependency floors above. Runtime beta.4 receipts
+are handled defensively without invented attribution, but beta.4 is not a
+supported release combination. Tests require new coverage and continuation
+by default; `FORGE_EXPECT_LEGACY_RUNTIME=1` is only for an explicit legacy probe.
 
 ## Surfaces
 
@@ -159,9 +193,18 @@ the human subagent command interface.
 Model tools expose the same options as `cwd`, `keepContext`, `continueId`, and
 `background` on `forge_subagent`. Use `forge_subagent_task` with `action`
 `status` / `result` / `cancel` and a run `id`, or `release` and a continuation
-`id`. These are new tool schemas: use matching development runtime + optional
-builds and restart/reload the test host before trying them. Published beta.4
+`id`. These are new tool schemas: install the matching runtime + optional
+artifacts and restart/reload the test host before trying them. Published beta.4
 runtime rejects context retention explicitly rather than pretending to resume.
+
+### Cleanup failures
+
+Generation teardown makes up to three immediate `runtime.dispose()` attempts
+with a runtime that owns backend cleanup. Recovered backend failures stop
+retrying; a persistent or unrecoverable lifecycle failure is logged. This is
+bounded best-effort cleanup, not a promise that every resource is released;
+there is no background retry service. Child requests with validated receipts
+remain billable even when cleanup fails.
 
 ### In-process continuation lifecycle
 
