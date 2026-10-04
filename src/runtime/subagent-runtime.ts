@@ -237,6 +237,7 @@ export function createForgeSubagentRuntime(
 	let lifecycleEpoch = 0;
 	const continuations = new Map<string, RetainedContinuationRecord>();
 	const MAX_TARGET_GENERATIONS = 16;
+	const GENERATION_DISPOSAL_ATTEMPTS = 3;
 
 	// Disposal of replaced generations is serialized through this chain; callers
 	// that are about to use a fresh generation await it so teardown of the
@@ -269,13 +270,27 @@ export function createForgeSubagentRuntime(
 
 	async function disposeGeneration(target: RuntimeGeneration): Promise<void> {
 		const runtime = target.runtime as ContinuationAwareRuntime;
-		await runtime.dispose();
 		// beta.4 leaves backend disposal to the host. New runtimes own this call
 		// (and also release retained continuations), so calling it here would
 		// double-dispose the in-process backend.
 		if (typeof runtime.releaseContinuation !== "function") {
+			await runtime.dispose();
 			await Promise.all([...target.backends.values()].map((backend) => backend.dispose?.()));
+			return;
 		}
+		// New runtimes retry the backend cleanups that failed when dispose() is
+		// called again. Make a small, bounded number of immediate attempts; the
+		// last failure is surfaced instead of being reported as released.
+		let lastError: unknown;
+		for (let attempt = 0; attempt < GENERATION_DISPOSAL_ATTEMPTS; attempt++) {
+			try {
+				await runtime.dispose();
+				return;
+			} catch (disposeError) {
+				lastError = disposeError;
+			}
+		}
+		throw lastError;
 	}
 
 	function surfaceDisposalError(label: string, disposeError: unknown): void {
