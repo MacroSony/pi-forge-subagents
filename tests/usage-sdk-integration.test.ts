@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { TranscriptContext, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream, createFauxCore, fauxAssistantMessage, fauxToolCall, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
@@ -49,7 +49,7 @@ const EXPECTED_NESTED = {
 function streamWithSyntheticReceipt(
 	faux: ReturnType<typeof createFauxCore>,
 	model: Model<any>,
-	context: Context,
+	context: TranscriptContext,
 	options?: SimpleStreamOptions,
 ) {
 	const source = faux.streamSimple(model, context, options);
@@ -226,9 +226,11 @@ test("registered forge_subagent survives the real SDK loop and JSONL reload with
 		assert.equal(toolResult.details.status, "completed");
 		assert.equal(typeof toolResult.details.response?.usage, "object", "legacy runtime usage remains visible in response details");
 
-		const forced = process.env.FORGE_EXPECT_RUNTIME_USAGE === "1" ||
-			toolResult.details.response.usage.requests !== undefined;
+		// The release runtime must deliver a coverage receipt; only an explicit
+		// legacy lane may fall back to the ambiguous beta.4 shape.
+		const forced = process.env.FORGE_EXPECT_LEGACY_RUNTIME !== "1";
 		if (forced) {
+			assert.notEqual(toolResult.details.response.usage.requests, undefined, "release runtime must report usage coverage");
 			assert.deepEqual(toolResult.usage, EXPECTED_NATIVE);
 			assert.deepEqual(toolResult.details.forgeNestedUsage, EXPECTED_NESTED);
 		} else {

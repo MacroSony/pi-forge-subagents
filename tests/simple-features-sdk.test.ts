@@ -1,9 +1,10 @@
+import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { Context, TranscriptContext, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { createFauxCore, fauxAssistantMessage, fauxToolCall, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ForgePrepareRequest, ForgePrepareResponse } from "@zihanw/pi-forge/subagent";
@@ -65,11 +66,11 @@ test("registered SDK tools cover continuation, background ownership, cwd binding
 		api: API,
 		baseUrl: "https://sdk-features.invalid",
 		apiKey: "fixture-only",
-		streamSimple: (model: Model<any>, context: Context, options?: SimpleStreamOptions) => {
+		streamSimple: (model: Model<any>, context: TranscriptContext, options?: SimpleStreamOptions) => {
 			transcripts.push({
-				systemPrompt: context.systemPrompt,
+				systemPrompt: getCurrentSystemPrompt(context.messages),
 				messages: structuredClone(context.messages),
-				...(context.tools ? { tools: context.tools.map((tool: any) => ({ name: tool.name })) as any } : {}),
+				...(getCurrentTools(context.messages) ? { tools: getCurrentTools(context.messages).map((tool: any) => ({ name: tool.name })) as any } : {}),
 			} as Context);
 			return faux.streamSimple(model, context, options);
 		},
@@ -169,9 +170,11 @@ test("registered SDK tools cover continuation, background ownership, cwd binding
 	};
 	const featureRuntime = runtime.descriptors(ctx).find((descriptor) => descriptor.id === "pi-inprocess") as any;
 	const continuationCapability = featureRuntime?.capabilities?.continuation === true;
-	const forced = process.env.FORGE_EXPECT_RUNTIME_CONTINUATION === "1";
-	if (forced) assert.equal(continuationCapability, true, "forced feature run requires the new continuation capability");
-	else assert.equal(continuationCapability, false, "installed beta.4 must report continuation unsupported");
+	// The release combination must exercise continuation. Only an explicit
+	// legacy lane (published runtime beta.4) may expect the rejection path.
+	const forced = process.env.FORGE_EXPECT_LEGACY_RUNTIME !== "1";
+	if (forced) assert.equal(continuationCapability, true, "the release runtime must expose continuation");
+	else assert.equal(continuationCapability, false, "legacy runtime beta.4 must report continuation unsupported");
 
 	try {
 		// Human rejection is exercised through the registered tool, not by calling

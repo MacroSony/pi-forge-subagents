@@ -53,9 +53,9 @@ function profile(profileId: string, scope: "project" | "global", overrides: Part
 
 const catalog = [profile("worker", "project"), profile("reviewer", "global")];
 
-test("package requires the first pi-forge release that exposes ui-contribution", () => {
+test("package requires the Forge 0.5.8 release baseline", () => {
 	const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-	assert.equal(manifest.dependencies["@zihanw/pi-forge"], "^0.5.1");
+	assert.equal(manifest.dependencies["@zihanw/pi-forge"], "^0.5.8");
 });
 
 function completeValues(overrides: Record<string, unknown> = {}): Record<string, unknown> {

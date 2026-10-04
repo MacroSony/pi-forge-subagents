@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { TranscriptContext, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { createFauxCore, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ForgePrepareRequest, ForgePrepareResponse } from "@zihanw/pi-forge/subagent";
@@ -132,7 +132,7 @@ async function createFixturePiRuntime(): Promise<{
 		api: API,
 		baseUrl: "https://fixture.invalid",
 		apiKey: "fixture-key",
-		streamSimple: (model: Model<any>, context: Context, options?: SimpleStreamOptions) =>
+		streamSimple: (model: Model<any>, context: TranscriptContext, options?: SimpleStreamOptions) =>
 			faux.streamSimple(model, context, options),
 		models: [{
 			id: MODEL_ID,

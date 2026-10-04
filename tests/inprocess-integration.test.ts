@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { TranscriptContext, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { createFauxCore, fauxAssistantMessage, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ForgePrepareRequest, ForgePrepareResponse } from "@zihanw/pi-forge/subagent";
@@ -41,7 +41,7 @@ test("Forge runtime runs an extension-registered provider through pi-inprocess",
 		api: API,
 		baseUrl: "https://fixture.invalid",
 		apiKey: "fixture-key",
-		streamSimple: (model: Model<any>, context: Context, options?: SimpleStreamOptions) =>
+		streamSimple: (model: Model<any>, context: TranscriptContext, options?: SimpleStreamOptions) =>
 			faux.streamSimple(model, context, options),
 		models: [{
 			id: MODEL_ID,
