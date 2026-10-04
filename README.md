@@ -50,7 +50,8 @@ is a separate opt-in local-checkout probe, never the default release gate.
 The test uses an isolated HOME/agent directory, real SDK parent and child
 sessions plus the real Forge compiler, and an offline synthetic provider.
 It checks `initial: [read]` / `[]`, target-relative reads, complete retained
-history, cleanup-failure usage in foreground/background, one-time collection,
+history, cleanup-failure usage in foreground/background, cancellation after a
+billed turn, pending inspection without credit, one-time collection,
 and JSONL reload. It does not certify live-provider billing or remote CI.
 
 ### Nested usage

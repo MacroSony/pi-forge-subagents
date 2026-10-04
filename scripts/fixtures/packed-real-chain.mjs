@@ -47,6 +47,8 @@ writeFileSync(join(configDir, "subagents.json"), JSON.stringify({
 }));
 const faux = createFauxCore({ api: provider, provider, models: [{ id: modelId, name: modelId, reasoning: true }] });
 const transcripts = [];
+let parkCancelledChild = false;
+let onChildParked;
 const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, allowModelNetwork: false });
 modelRuntime.registerProvider(provider, {
   api: provider, baseUrl: "https://packed-chain.invalid", apiKey: "synthetic-only",
@@ -56,6 +58,24 @@ modelRuntime.registerProvider(provider, {
     transcripts.push({ system: getCurrentSystemPrompt(context.messages),
       tools: (getCurrentTools(context.messages) ?? []).map((tool) => tool.name),
       messages: structuredClone(context.messages) });
+    // Park the second child request after a real, billed read-tool turn. This
+    // gives cancellation a deterministic partial-usage receipt to preserve.
+    if (parkCancelledChild && context.messages.some((m) => m.role === "toolResult" && m.toolCallId === "cancel-read")) {
+      const stream = createAssistantMessageEventStream();
+      const abort = () => {
+        const message = { role: "assistant", content: [], api: model.api,
+          provider: model.provider, model: model.id, stopReason: "aborted",
+          errorMessage: "synthetic request cancelled", timestamp: Date.now(),
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+        stream.push({ type: "error", reason: "aborted", error: message });
+        stream.end(message);
+      };
+      if (options?.signal?.aborted) abort();
+      else options?.signal?.addEventListener("abort", abort, { once: true });
+      onChildParked?.();
+      return stream;
+    }
     const source = faux.streamSimple(model, context, options);
     const stream = createAssistantMessageEventStream();
     void (async () => {
@@ -207,8 +227,47 @@ try {
   assert.equal(view.nested.session.calls, 2);
   assert.equal(view.nested.session.input, 22);
   assert.equal(view.nested.session.cacheRead, 10);
+
+  // Cancellation after a billed turn: pending inspection cannot claim usage;
+  // the first terminal collection persists the partial receipt exactly once.
+  const parked = new Promise((resolve) => { onChildParked = resolve; });
+  parkCancelledChild = true;
+  faux.setResponses([fauxAssistantMessage(fauxToolCall("read", { path: "relative.txt" }, { id: "cancel-read" }))]);
+  const cancelLaunch = await run({ task: "cancel after one billed turn", cwd: target, background: true });
+  assert.equal(cancelLaunch.details.background, true, JSON.stringify(cancelLaunch));
+  let timer;
+  try {
+    await Promise.race([parked, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("child did not park")), 10_000); })]);
+  } finally { clearTimeout(timer); }
+  const pending = await task("result", cancelLaunch.details.runId);
+  assert.equal(pending.details.usageCredited, false);
+  assert.equal(pending.details.task.collected, false);
+  assert.equal(pending.usage, undefined);
+  await task("cancel", cancelLaunch.details.runId);
+  assert.equal(await waitForTask(cancelLaunch.details.runId), "cancelled");
+  parkCancelledChild = false;
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("forge_subagent_task", { action: "result", id: cancelLaunch.details.runId }, { id: "cancel-first" })),
+    fauxAssistantMessage(fauxToolCall("forge_subagent_task", { action: "result", id: cancelLaunch.details.runId }, { id: "cancel-second" })),
+    fauxAssistantMessage("PARENT-CANCEL-COLLECTED"),
+  ]);
+  await session.prompt("Collect the cancelled child's partial usage twice.");
+  await session.waitForIdle();
+  const cancelled = resultMessages().slice(-2);
+  assert.equal(cancelled[0].details.response.status, "cancelled");
+  assert.equal(cancelled[0].details.usageCredited, true);
+  assert.deepEqual(cancelled[0].usage, receipt, "only the completed first request carries tokens");
+  assert.equal(cancelled[1].details.usageCredited, false);
+  assert.equal(cancelled[1].usage, undefined);
+  assert.equal(cancelled[1].details.forgeNestedUsage, undefined);
+  assert.equal(session.getSessionStats().tokens.total, 275, "8 parent + 3 nonzero child receipts");
+  const cancelledView = summarize(SessionManager.open(sessionManager.getSessionFile()).getBranch());
+  assert.equal(cancelledView.main.session.requests, 8);
+  assert.equal(cancelledView.nested.session.calls, 3);
+  assert.equal(cancelledView.nested.session.requests, 2 + cancelled[0].details.response.usage.requests.total);
+  assert.equal(cancelledView.nested.session.input, 33);
   assert.deepEqual(extensionErrors, []);
-  console.log("real packed chain: PASS (real Forge + SDK parent/child; initial read/empty, target relative read, retained history, foreground/background cleanup usage once, JSONL)");
+  console.log("real packed chain: PASS (real Forge + SDK parent/child; initial read/empty, target relative read, retained history, cleanup/cancellation usage once, pending collection, JSONL)");
 } finally {
   AgentSession.prototype.dispose = originalDispose;
   await session.extensionRunner.emit({ type: "session_shutdown", reason: "exit" });

@@ -4,7 +4,7 @@
 
 - Require published Forge ^0.5.8 and runtime ^0.1.0-beta.5; pin development Pi SDKs to 1.0.2. TypeBox is a wildcard optional host peer with development pin 1.3.27, avoiding duplicate host-module warnings.
 - Retry generation backend cleanup at most three times and surface the final failure. This is bounded best-effort cleanup, not unconditional resource release.
-- Require continuation and usage coverage in release tests by default. Packed checks use exact published dependency floors, normal peer resolution, isolated HOME/agent directories, and real Forge + parent/child SDK sessions with an offline provider. Cover initial tools, target-relative reads, retained history, foreground/background cleanup-failure usage exactly once, and JSONL reload on Pi 0.87.0 / 1.0.2.
+- Require continuation and usage coverage in release tests by default. Packed checks use exact published dependency floors, normal peer resolution, isolated HOME/agent directories, and real Forge + parent/child SDK sessions with an offline provider. Cover initial tools, target-relative reads, retained history, foreground/background cleanup-failure and cancellation usage exactly once, pending collection without credit, and JSONL reload on Pi 0.87.0 / 1.0.2.
 - CI no longer checks out a moving sibling Forge main; usage integration loads the installed Forge artifact instead of sibling source.
 
 - Set effective `allowAgentInvocationWithoutApproval` to `false` with a warning when explicitly present as a non-boolean value (including `null`, strings `'false'`/`'true'`, numbers, and objects/arrays) at that configuration layer, rather than silently retaining a previous layer's `true`. Omitted `allowAgentInvocationWithoutApproval` continues to inherit across layers.
