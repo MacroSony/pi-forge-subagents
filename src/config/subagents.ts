@@ -227,8 +227,13 @@ function applySection(raw: Record<string, unknown>, source: "project" | "global"
 	} else if (raw.timeoutMs !== undefined) {
 		settings.warnings.push(`pi-forge-subagents: ${source} timeoutMs must be an integer from ${MIN_SUBAGENT_TIMEOUT_MS} to ${MAX_SUBAGENT_TIMEOUT_MS}; ignored.`);
 	}
-	if (typeof raw.allowAgentInvocationWithoutApproval === "boolean") {
-		settings.allowAgentInvocationWithoutApproval = raw.allowAgentInvocationWithoutApproval;
+	if (Object.hasOwn(raw, "allowAgentInvocationWithoutApproval")) {
+		if (typeof raw.allowAgentInvocationWithoutApproval === "boolean") {
+			settings.allowAgentInvocationWithoutApproval = raw.allowAgentInvocationWithoutApproval;
+		} else {
+			settings.allowAgentInvocationWithoutApproval = false;
+			settings.warnings.push(`pi-forge-subagents: ${source} allowAgentInvocationWithoutApproval must be boolean; set to false.`);
+		}
 	}
 	if (typeof raw.summaryInToolDescription === "boolean") {
 		settings.summaryInToolDescription = raw.summaryInToolDescription;

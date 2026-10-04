@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Set effective `allowAgentInvocationWithoutApproval` to `false` with a warning when explicitly present as a non-boolean value (including `null`, strings `'false'`/`'true'`, numbers, and objects/arrays) at that configuration layer, rather than silently retaining a previous layer's `true`. Omitted `allowAgentInvocationWithoutApproval` continues to inherit across layers.
 - Add model-tool `cwd`, `keepContext`, `continueId`, and `background` options plus `forge_subagent_task` status/result/cancel/release. Background results credit native/nested usage once, and only on the launch branch or descendants.
 
 - Add CLI flags `--cwd` (supporting quoted paths), `--keep-context`, `--continue` (with implied context retention), and `--background` (run only) to `/forge subagent` and `/forge-agent`.

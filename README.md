@@ -51,6 +51,15 @@ Subagent configuration lives in `.pi/forge/subagents.json` (project) and
 `~/.pi/forge/subagents.json` (global). Legacy `config.json.subagents` is accepted
 as a read-only fallback with a warning.
 
+In the development source, an omitted `allowAgentInvocationWithoutApproval`
+inherits the preceding layer. An explicit boolean overrides it; an explicit
+non-boolean value (including `null` or the string `"false"`) instead sets that
+layer to `false` and emits a warning. A valid boolean in a higher-priority layer
+can still override normally. This field-level fix is not in published 0.5.3.
+An unreadable, malformed, or non-object config file is still ignored with a
+warning, so an earlier valid layer may remain effective. Untrusted project
+settings are ignored, and delegation execution still requires project trust.
+
 Profile keys are scope selectors, not just profile names. Use canonical
 `project:<id>` or `global:<id>` keys. A bare key is retained for compatibility
 with project profiles only and never grants authority to a same-named global

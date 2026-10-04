@@ -236,3 +236,190 @@ test("profile-level values report per-file provenance (global vs project)", () =
 		rmSync(globalRoot, { recursive: true, force: true });
 	}
 });
+
+test("allowAgentInvocationWithoutApproval: global true + project absent/true/false/nonbooleans", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-approval-project-"));
+	const globalForgeDir = mkdtempSync(join(tmpdir(), "pi-forge-subagents-approval-global-"));
+	const previousGlobalDir = process.env.PI_FORGE_GLOBAL_DIR;
+	try {
+		process.env.PI_FORGE_GLOBAL_DIR = globalForgeDir;
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+
+		// Global sets allowAgentInvocationWithoutApproval: true
+		writeFileSync(join(globalForgeDir, "subagents.json"), JSON.stringify({
+			allowAgentInvocationWithoutApproval: true,
+		}), "utf8");
+
+		// 1. Project omits allowAgentInvocationWithoutApproval -> inherits true
+		writeFileSync(join(cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
+			timeoutMs: 30_000,
+		}), "utf8");
+		let settings = loadForgeSubagentSettings(context(cwd));
+		assert.equal(settings.allowAgentInvocationWithoutApproval, true);
+
+		// 2. Project explicitly sets true -> true
+		writeFileSync(join(cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
+			allowAgentInvocationWithoutApproval: true,
+		}), "utf8");
+		settings = loadForgeSubagentSettings(context(cwd));
+		assert.equal(settings.allowAgentInvocationWithoutApproval, true);
+
+		// 3. Project explicitly sets false -> false
+		writeFileSync(join(cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
+			allowAgentInvocationWithoutApproval: false,
+		}), "utf8");
+		settings = loadForgeSubagentSettings(context(cwd));
+		assert.equal(settings.allowAgentInvocationWithoutApproval, false);
+
+		// 4. Project explicitly sets nonbooleans: null, 'false', 'true', numbers, objects, arrays
+		// MUST set effective field false at that config layer and warn, not silently retain previous layer true.
+		const nonBooleans: unknown[] = [null, "false", "true", 0, 1, 42, {}, [], ["unexpected"]];
+		for (const val of nonBooleans) {
+			writeFileSync(join(cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
+				allowAgentInvocationWithoutApproval: val,
+			}), "utf8");
+			settings = loadForgeSubagentSettings(context(cwd));
+			assert.equal(
+				settings.allowAgentInvocationWithoutApproval,
+				false,
+				`Expected false for non-boolean ${JSON.stringify(val)}, got ${settings.allowAgentInvocationWithoutApproval}`,
+			);
+			assert.equal(
+				settings.warnings.some((w) => w.includes("project allowAgentInvocationWithoutApproval must be boolean; set to false")),
+				true,
+				`Expected warning for non-boolean ${JSON.stringify(val)}`,
+			);
+		}
+	} finally {
+		if (previousGlobalDir === undefined) delete process.env.PI_FORGE_GLOBAL_DIR;
+		else process.env.PI_FORGE_GLOBAL_DIR = previousGlobalDir;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(globalForgeDir, { recursive: true, force: true });
+	}
+});
+
+test("allowAgentInvocationWithoutApproval: legacy true then dedicated invalid sets false and warns", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-legacy-approval-"));
+	const globalForgeDir = mkdtempSync(join(tmpdir(), "pi-forge-subagents-legacy-approval-global-"));
+	const previousGlobalDir = process.env.PI_FORGE_GLOBAL_DIR;
+	try {
+		process.env.PI_FORGE_GLOBAL_DIR = globalForgeDir;
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+
+		// Project legacy config.json sets allowAgentInvocationWithoutApproval: true
+		writeFileSync(join(cwd, ".pi", "forge", "config.json"), JSON.stringify({
+			subagents: {
+				allowAgentInvocationWithoutApproval: true,
+			},
+		}), "utf8");
+
+		// Dedicated subagents.json sets invalid non-boolean value
+		writeFileSync(join(cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
+			allowAgentInvocationWithoutApproval: "invalid",
+		}), "utf8");
+
+		const settings = loadForgeSubagentSettings(context(cwd));
+		assert.equal(settings.allowAgentInvocationWithoutApproval, false);
+		assert.equal(
+			settings.warnings.some((w) => w.includes("project allowAgentInvocationWithoutApproval must be boolean; set to false")),
+			true,
+		);
+	} finally {
+		if (previousGlobalDir === undefined) delete process.env.PI_FORGE_GLOBAL_DIR;
+		else process.env.PI_FORGE_GLOBAL_DIR = previousGlobalDir;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(globalForgeDir, { recursive: true, force: true });
+	}
+});
+
+test("allowAgentInvocationWithoutApproval: invalid global overridden by valid higher-priority project true", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-override-project-"));
+	const globalForgeDir = mkdtempSync(join(tmpdir(), "pi-forge-subagents-override-global-"));
+	const previousGlobalDir = process.env.PI_FORGE_GLOBAL_DIR;
+	try {
+		process.env.PI_FORGE_GLOBAL_DIR = globalForgeDir;
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+
+		// Global has invalid non-boolean
+		writeFileSync(join(globalForgeDir, "subagents.json"), JSON.stringify({
+			allowAgentInvocationWithoutApproval: "invalid",
+		}), "utf8");
+
+		// Project (trusted) has valid true
+		writeFileSync(join(cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
+			allowAgentInvocationWithoutApproval: true,
+		}), "utf8");
+
+		const settings = loadForgeSubagentSettings(context(cwd, true));
+		// Higher-priority project true overrides global invalid
+		assert.equal(settings.allowAgentInvocationWithoutApproval, true);
+		// Global warning is still recorded
+		assert.equal(
+			settings.warnings.some((w) => w.includes("global allowAgentInvocationWithoutApproval must be boolean; set to false")),
+			true,
+		);
+	} finally {
+		if (previousGlobalDir === undefined) delete process.env.PI_FORGE_GLOBAL_DIR;
+		else process.env.PI_FORGE_GLOBAL_DIR = previousGlobalDir;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(globalForgeDir, { recursive: true, force: true });
+	}
+});
+
+test("allowAgentInvocationWithoutApproval: untrusted project ignored as before", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-untrusted-approval-"));
+	const globalForgeDir = mkdtempSync(join(tmpdir(), "pi-forge-subagents-untrusted-approval-global-"));
+	const previousGlobalDir = process.env.PI_FORGE_GLOBAL_DIR;
+	try {
+		process.env.PI_FORGE_GLOBAL_DIR = globalForgeDir;
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+
+		// Global has true
+		writeFileSync(join(globalForgeDir, "subagents.json"), JSON.stringify({
+			allowAgentInvocationWithoutApproval: true,
+		}), "utf8");
+
+		for (const value of [false, "false", null]) {
+			writeFileSync(join(cwd, ".pi", "forge", "subagents.json"), JSON.stringify({
+				allowAgentInvocationWithoutApproval: value,
+			}), "utf8");
+			const settings = loadForgeSubagentSettings(context(cwd, false));
+			// Untrusted project settings are not applied, even to revoke a global value.
+			// The separate execution trust gate still prevents delegation from this project.
+			assert.equal(settings.allowAgentInvocationWithoutApproval, true);
+			assert.equal(settings.warnings.some((w) => /not trusted/.test(w)), true);
+			assert.equal(settings.warnings.some((w) => w.includes("must be boolean")), false);
+		}
+	} finally {
+		if (previousGlobalDir === undefined) delete process.env.PI_FORGE_GLOBAL_DIR;
+		else process.env.PI_FORGE_GLOBAL_DIR = previousGlobalDir;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(globalForgeDir, { recursive: true, force: true });
+	}
+});
+
+
+test("malformed whole config files retain the documented ignore-with-warning behavior", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-invalid-file-project-"));
+	const globalForgeDir = mkdtempSync(join(tmpdir(), "pi-forge-subagents-invalid-file-global-"));
+	const previousGlobalDir = process.env.PI_FORGE_GLOBAL_DIR;
+	try {
+		process.env.PI_FORGE_GLOBAL_DIR = globalForgeDir;
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		writeFileSync(join(globalForgeDir, "subagents.json"), JSON.stringify({
+			allowAgentInvocationWithoutApproval: true,
+		}), "utf8");
+		const projectPath = projectSubagentsConfigPath(cwd);
+		for (const text of ["{", "[]", "null"]) {
+			writeFileSync(projectPath, text, "utf8");
+			const settings = loadForgeSubagentSettings(context(cwd));
+			assert.equal(settings.allowAgentInvocationWithoutApproval, true);
+			assert.equal(settings.warnings.some((w) => w.includes(projectPath) && /ignored/.test(w)), true);
+		}
+	} finally {
+		if (previousGlobalDir === undefined) delete process.env.PI_FORGE_GLOBAL_DIR;
+		else process.env.PI_FORGE_GLOBAL_DIR = previousGlobalDir;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(globalForgeDir, { recursive: true, force: true });
+	}
+});
