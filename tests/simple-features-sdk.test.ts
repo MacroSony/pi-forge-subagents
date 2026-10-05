@@ -1,6 +1,6 @@
 import { getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -92,7 +92,13 @@ test("registered SDK tools cover continuation, background ownership, cwd binding
 	const root = mkdtempSync(join(tmpdir(), "pi-forge-sdk-features-"));
 	const target = join(root, "approved-target");
 	mkdirSync(join(root, ".pi", "forge"), { recursive: true });
-	mkdirSync(target);
+	// Exercise canonical cwd binding even when the host tmpdir has no aliases.
+	// macOS runners commonly expose /var/... as /private/var/....
+	const targetStorage = join(root, "target-storage");
+	mkdirSync(targetStorage);
+	symlinkSync(targetStorage, target, process.platform === "win32" ? "junction" : "dir");
+	const canonicalTarget = realpathSync(target);
+	assert.notEqual(canonicalTarget, target, "fixture must exercise a non-canonical target");
 	const toolMarker = join(root, "tool-history.txt");
 	writeFileSync(toolMarker, "tool history retained", "utf8");
 	const marker = "FULL-MARKER-SDK-FEATURES";
@@ -269,7 +275,7 @@ test("registered SDK tools cover continuation, background ownership, cwd binding
 		assert.ok(externalUsage && externalUsage.tokens, "each run must expose its own usage delta");
 		if (externalUsage?.requests) assert.equal(externalUsage.requests.total, 1, "usage is per run, not cumulative");
 		const backendUpdates = updates.flatMap((update) => update.details?.progress ?? []);
-		assert.ok(backendUpdates.some((update: any) => update.details?.workingDirectory === target), "backend must bind the approved target cwd");
+		assert.ok(backendUpdates.some((update: any) => update.details?.workingDirectory === canonicalTarget), "backend must bind the canonical approved target cwd");
 		assert.ok(backendUpdates.some((update: any) => Array.isArray(update.details?.effectiveToolNames) && update.details.effectiveToolNames.includes("read")), "backend tools must be visible in real execution updates");
 		assert.ok(preparedRequests.some((request) => request.task.text === "approved target fingerprint" && request.backend.toolCatalog.length > 0));
 
