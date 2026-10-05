@@ -6,6 +6,7 @@ export function validateBackendPreflight(
 	request?: AgentRequest,
 	snapshot?: AgentProfileSnapshot,
 	expectedModel?: { provider: string; id: string },
+	expectedThinkingLevel?: string,
 ): SubagentDiagnostic[] {
 	const diagnostics: SubagentDiagnostic[] = [];
 	if (!isRecord(value)) return [error("preflight.type", "BackendPreflightResult must be an object.", "$")];
@@ -50,8 +51,8 @@ export function validateBackendPreflight(
 		if (value.model.provider !== profileModel.provider || value.model.id !== profileModel.id) {
 			diagnostics.push(error("preflight.model-mismatch", "Preflight model does not match the expected model.", "model"));
 		}
-		if (value.thinkingLevel !== snapshot.profile.thinkingLevel) {
-			diagnostics.push(error("preflight.thinking-mismatch", "Preflight thinkingLevel does not match the profile snapshot.", "thinkingLevel"));
+		if (value.thinkingLevel !== (expectedThinkingLevel ?? snapshot.profile.thinkingLevel)) {
+			diagnostics.push(error("preflight.thinking-mismatch", "Preflight thinkingLevel does not match the expected thinking level.", "thinkingLevel"));
 		}
 		if (isRecord(value.promptRuntime) && isRecord(value.promptRuntime.model)
 			&& (value.promptRuntime.model.provider !== value.model.provider || value.promptRuntime.model.id !== value.model.id)) {

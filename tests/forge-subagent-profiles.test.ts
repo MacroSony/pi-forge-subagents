@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { registerForgeSubagentProfilesTool, canonicalProfileId, summarizeProfile, renderEmbeddedSummaryText, type ForgeSubagentProfileSummary } from "../src/tool/forge-subagent-profiles.ts";
+import { registerForgeSubagentProfilesTool, canonicalProfileId, summarizeProfile, renderEmbeddedSummaryText, renderProfileCatalog, type ForgeSubagentProfileSummary } from "../src/tool/forge-subagent-profiles.ts";
 import type { ForgeHostSession } from "../src/host/session.ts";
 import type { ForgeProfileSummary } from "@zihanw/pi-forge/subagent";
 import { resolveSubagentProfilePolicy, type ForgeSubagentSettings } from "../src/config/subagents.ts";
@@ -128,4 +128,85 @@ test("renderEmbeddedSummaryText returns a bounded enabled-profile summary", () =
 	const text = renderEmbeddedSummaryText([summary]);
 	assert.ok(text?.includes("project:worker"));
 	assert.ok(text?.includes("backend pi-subprocess-readonly"));
+});
+
+test("profile summaries expose effective model/thinking override permission per profile", () => {
+	const profile = profileSummary();
+	const base = settings();
+	const off = summarizeProfile(profile, resolveSubagentProfilePolicy(base, "project:worker"));
+	assert.equal(off.allowAgentModelOverrides, false);
+	const on = summarizeProfile(profile, resolveSubagentProfilePolicy({
+		...base,
+		allowAgentModelOverrides: false,
+		profiles: { "project:worker": { enabled: true, allowAgentModelOverrides: true } },
+	}, "project:worker"));
+	assert.equal(on.allowAgentModelOverrides, true);
+
+	const offText = renderProfileCatalog([off], true);
+	assert.match(offText, /Unattended model\/thinking overrides: not allowed for unattended calls/);
+	const onText = renderProfileCatalog([on], true);
+	assert.match(onText, /Unattended model\/thinking overrides: allowed \(permission only; nothing switches automatically\)/);
+	assert.match(onText, /model provider\/id and\/or thinkingLevel/);
+	assert.match(onText, /omitted fields use the profile values/);
+	assert.match(onText, /unsupported model or thinking level is an error with no fallback/);
+	assert.match(onText, /cost and which provider receives prompt data/);
+	assert.doesNotMatch(onText, /Unattended model\/thinking overrides: not allowed/);
+	assert.match(renderEmbeddedSummaryText([on]) ?? "", /model\/thinking overrides allowed/);
+	assert.match(renderEmbeddedSummaryText([off]) ?? "", /model\/thinking overrides off/);
+});
+
+test("forge_subagent_profiles discovery shows per-profile override permission from config", async () => {
+	const { mkdtempSync, mkdirSync, rmSync, writeFileSync } = await import("node:fs");
+	const { tmpdir } = await import("node:os");
+	const { join } = await import("node:path");
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-profiles-overrides-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		const configPath = join(cwd, ".pi", "forge", "subagents.json");
+		const second = { ...profileSummary(), profileId: "scribe" };
+		let captured: any;
+		const pi = { registerTool: (tool: any) => { captured = tool; }, getActiveTools: () => ["forge_subagent"] } as any;
+		const session = { listProfiles: async () => [profileSummary(), second] } as unknown as ForgeHostSession;
+		registerForgeSubagentProfilesTool(pi, () => session);
+		const ctx = { cwd, isProjectTrusted: () => true } as any;
+		const run = async () => {
+			const result = await captured.execute("call", {}, undefined, undefined, ctx);
+			const details = result.details as { profiles: ForgeSubagentProfileSummary[]; configWarnings: string[] };
+			return { text: result.content[0].text as string, byId: Object.fromEntries(details.profiles.map((p) => [p.id, p.allowAgentModelOverrides])), details };
+		};
+
+		writeFileSync(configPath, JSON.stringify({
+			allowAgentModelOverrides: true,
+			profiles: { "project:worker": { enabled: true }, "project:scribe": { enabled: true, allowAgentModelOverrides: false } },
+		}), "utf8");
+		let out = await run();
+		assert.deepEqual(out.byId, { "project:worker": true, "project:scribe": false });
+		assert.equal((out.text.match(/Unattended model\/thinking overrides: allowed/g) ?? []).length, 1);
+		assert.equal((out.text.match(/Unattended model\/thinking overrides: not allowed/g) ?? []).length, 1);
+
+		writeFileSync(configPath, JSON.stringify({
+			allowAgentModelOverrides: true,
+			profiles: { "project:worker": { enabled: true, allowAgentModelOverrides: null } },
+		}), "utf8");
+		out = await run();
+		assert.deepEqual(out.byId, { "project:worker": false });
+		assert.equal(out.details.configWarnings.some((w) => /allowAgentModelOverrides must be boolean; set to false/.test(w)), true);
+		assert.match(out.text, /Configuration warning: .*allowAgentModelOverrides must be boolean/);
+
+		writeFileSync(configPath, JSON.stringify({ profiles: { "project:worker": { enabled: true } } }), "utf8");
+		out = await run();
+		assert.deepEqual(out.byId, { "project:worker": false });
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("untrusted discovery lists no profiles and therefore grants no override permission", async () => {
+	let captured: any;
+	const pi = { registerTool: (tool: any) => { captured = tool; }, getActiveTools: () => [] } as any;
+	registerForgeSubagentProfilesTool(pi, () => ({ listProfiles: async () => [profileSummary()] }) as unknown as ForgeHostSession);
+	const result = await captured.execute("call", {}, undefined, undefined, { cwd: "/untrusted", isProjectTrusted: () => false } as any);
+	assert.equal((result.details as any).status, "disabled");
+	assert.deepEqual((result.details as any).profiles, []);
+	assert.doesNotMatch(result.content[0].text, /overrides: allowed/);
 });

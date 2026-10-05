@@ -637,3 +637,30 @@ test("public validators diagnose malformed unknown values without throwing", () 
 		assert.equal(hasSubagentErrors(validate() as ReturnType<typeof validateAgentRequest>), true);
 	}
 });
+
+test("expected thinking override is strict while the original profile fingerprint stays intact", () => {
+	const req = request();
+	const snap = snapshot();
+	const receipt = preflight({ thinkingLevel: "low" });
+	assert.ok(validateBackendPreflight(receipt, req, snap).some((d) => d.code === "preflight.thinking-mismatch"));
+	assert.equal(hasSubagentErrors(validateBackendPreflight(receipt, req, snap, undefined, "low")), false);
+	assert.ok(validateBackendPreflight(receipt, req, snap, undefined, "medium").some((d) => d.code === "preflight.thinking-mismatch"));
+	const input = {
+		runId: "t-abcdef-1", request: req, snapshot: snap, preflight: receipt,
+		preparation: {
+			systemPrompt: "compiled", messages: [createProtectedSubagentTask(req.input)],
+			toolNegotiation: { effectiveToolIds: [], effectiveToolNames: [], stackSelectedToolNames: [], unmatchedAllowPatterns: [], diagnostics: [] },
+			diagnostics: [],
+		},
+		runtime: preparationRuntime(), conversationFingerprint: CONVERSATION_DIGEST, executionFingerprint: EXECUTION_DIGEST,
+	};
+	assert.equal(createAgentExecutionPlan(input).plan, undefined);
+	assert.equal(createAgentExecutionPlan({ ...input, thinkingLevelOverride: "medium" }).plan, undefined);
+	const result = createAgentExecutionPlan({ ...input, thinkingLevelOverride: "low" });
+	assert.ok(result.plan);
+	assert.equal(result.plan.thinkingLevel, "low");
+	assert.deepEqual(result.plan.profile, snap);
+	assert.deepEqual(validateAgentExecutionPlan(result.plan, req), []);
+	result.plan.preflight.thinkingLevel = "medium";
+	assert.ok(validateAgentExecutionPlan(result.plan, req).some((d) => d.code === "preflight.thinking-mismatch"));
+});

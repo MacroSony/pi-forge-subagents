@@ -298,11 +298,11 @@ test("subcommand argument guards: status, result, cancel, release", async () => 
 	// release: requires exactly 1 argument
 	const { ctx: relCtx0, notifications: relWarns0 } = createDummyContext();
 	await handler("release", relCtx0);
-	assert.ok(relWarns0.some((n) => n.type === "warning" && n.message.includes("Usage: /forge-agent release <continueId>")));
+	assert.ok(relWarns0.some((n) => n.type === "warning" && n.message.includes("Usage: /forge-agent release <context-or-task-id>")));
 
 	const { ctx: relCtx2, notifications: relWarns2 } = createDummyContext();
 	await handler("release id1 id2", relCtx2);
-	assert.ok(relWarns2.some((n) => n.type === "warning" && n.message.includes("accepts exactly one continuation ID")));
+	assert.ok(relWarns2.some((n) => n.type === "warning" && n.message.includes("accepts exactly one context or finished-task ID")));
 });
 
 test("plan: always passes unattended: false to runtime.prepare, shows target CWD, run ID, and continuation ID", async () => {
@@ -480,4 +480,29 @@ test("argument completions: flags include --cwd, --keep-context, --continue, and
 	// Task text stops completion
 	const afterTask = await completer("run worker --cwd /tmp task started ");
 	assert.equal(afterTask, null);
+});
+
+
+test("CLI model and thinking flags parse, validate and cannot consume task text", () => {
+ const parsed = parsePlanRunArgs("run", 'worker --model openai-codex/gpt-6.1-sol --thinking high --cwd /tmp -- task text');
+ assert.equal(parsed.ok, true);
+ if (!parsed.ok) return;
+ assert.deepEqual(parsed.model, {provider:"openai-codex",id:"gpt-6.1-sol"});
+ assert.equal(parsed.thinkingLevel,"high"); assert.equal(parsed.task,"task text");
+ const equals = parsePlanRunArgs("plan", 'worker --model="anthropic/claude-sonnet-5-5" --thinking=off -- task');
+ assert.equal(equals.ok,true); if(equals.ok) assert.equal(equals.thinkingLevel,"off");
+ for(const args of ['worker --model -- task','worker --model bad -- task','worker --thinking nonsense -- task','worker --thinking -- task','worker task --model p/m','worker task --thinking high']) assert.equal(parsePlanRunArgs("run",args).ok,false,args);
+ assert.equal(parsePlanRunArgs("run",'worker -- --model is literal task').ok,true);
+});
+
+test("CLI forwards overrides as human-approved and contexts lists without collecting", async () => {
+ const prepared = createDummyPrepared();
+ let options: any;
+ const runtime = createDummyRuntime({prepare:async (_p,_t,_c,run)=>{options=run;return {ok:true,prepared};},listContinuations:()=>[{id:"c-ab12cd-1",profileId:"project:worker",backendId:"pi-inprocess",cwd:"/target",model:{provider:"p",id:"m"},thinkingLevel:"low"}]});
+ const {ctx,editors,notifications}=createDummyContext();
+ const handler=createForgeAgentCommandHandler(runtime,()=>({}) as ForgeHostSession);
+ await handler('plan worker --model p/m --thinking low -- task',ctx);
+ assert.equal(options.unattended,false);assert.deepEqual(options.model,{provider:"p",id:"m"});assert.equal(options.thinkingLevel,"low");
+ await handler('contexts',ctx);assert.match(editors.at(-1)!.text,/c-ab12cd-1.*p\/m thinking:low/);
+ await handler('contexts unexpected',ctx);assert.ok(notifications.some(n=>n.message.includes('Usage: /forge-agent contexts')));
 });

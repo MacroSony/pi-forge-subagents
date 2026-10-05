@@ -19,6 +19,7 @@ const cwd = process.env.FORGE_CHAIN_CWD;
 assert.ok(cwd);
 const provider = "packed-chain";
 const modelId = "fixture";
+const alternateId = "alternate";
 const receipt = {
   input: 11, output: 7, cacheRead: 5, cacheWrite: 2, totalTokens: 25,
   cost: { input: 0.01, output: 0.02, cacheRead: 0.003, cacheWrite: 0.004, total: 0.037 },
@@ -45,15 +46,15 @@ writeFileSync(join(configDir, "subagents.json"), JSON.stringify({
   profiles: Object.fromEntries(["read-worker", "empty-worker"].map((id) =>
     [`project:${id}`, { enabled: true, backend: "pi-inprocess" }])),
 }));
-const faux = createFauxCore({ api: provider, provider, models: [{ id: modelId, name: modelId, reasoning: true }] });
+const faux = createFauxCore({ api: provider, provider, models: [{ id: modelId, name: modelId, reasoning: true }, { id: alternateId, name: alternateId, reasoning: true }] });
 const transcripts = [];
 let parkCancelledChild = false;
 let onChildParked;
 const modelRuntime = await ModelRuntime.create({ credentials: new InMemoryCredentialStore(), modelsPath: null, allowModelNetwork: false });
 modelRuntime.registerProvider(provider, {
   api: provider, baseUrl: "https://packed-chain.invalid", apiKey: "synthetic-only",
-  models: [{ id: modelId, name: modelId, reasoning: true, input: ["text"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32_000, maxTokens: 4_000 }],
+  models: [modelId, alternateId].map((id) => ({ id, name: id, reasoning: true, input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 32_000, maxTokens: 4_000 })),
   streamSimple(model, context, options) {
     transcripts.push({ system: getCurrentSystemPrompt(context.messages),
       tools: (getCurrentTools(context.messages) ?? []).map((tool) => tool.name),
@@ -147,6 +148,52 @@ function failNextChildDispose() {
 }
 try {
   assert.ok(optional.session, "actual SDK session_start must discover the real Forge host");
+  // New optional features must be exercised in the actual packed consumer, not
+  // only src tests. Default-off rejection, authorized model/thinking selection,
+  // retained inheritance/revocation and short handle cleanup are all non-egress.
+  const configPath = join(configDir, "subagents.json");
+  const enabledConfig = {allowAgentInvocationWithoutApproval:true, allowedWorkingDirectories:[target],
+    profiles:Object.fromEntries(["read-worker","empty-worker"].map((id)=>[`project:${id}`,{enabled:true,backend:"pi-inprocess"}]))};
+  const requested = {profileId:"project:empty-worker",task:"PACKED-OVERRIDE",model:`${provider}/${alternateId}`,thinkingLevel:"high",keepContext:true};
+  const callsBefore=transcripts.length;
+  assert.equal((await run(requested)).details.status,"failed");
+  assert.equal(transcripts.length,callsBefore);
+  writeFileSync(configPath,JSON.stringify({...enabledConfig,allowAgentModelOverrides:true}));
+  faux.setResponses([fauxAssistantMessage("OVERRIDDEN-ANSWER"),fauxAssistantMessage("OVERRIDDEN-CONTINUED")]);
+  const overridden=await run(requested);
+  assert.equal(overridden.details.status,"completed",JSON.stringify(overridden));
+  const retainedId=overridden.details.response.continuationId;
+  assert.match(retainedId,/^c-[a-z0-9]{6}-\d+$/);
+  assert.match(overridden.details.response.runId,/^t-[a-z0-9]{6}-\d+$/);
+  const contexts=await task("contexts");
+  assert.equal(contexts.details.contexts[0].model.id,alternateId);
+  assert.equal(contexts.details.contexts[0].thinkingLevel,"high");
+  const originalCount=transcripts.length;
+  assert.equal((await run({profileId:"project:empty-worker",task:"must reject",continueId:retainedId,thinkingLevel:"low"})).details.status,"failed");
+  writeFileSync(configPath,JSON.stringify(enabledConfig));
+  assert.equal((await run({profileId:"project:empty-worker",task:"must reject",continueId:retainedId})).details.status,"failed");
+  assert.equal(transcripts.length,originalCount);
+  writeFileSync(configPath,JSON.stringify({...enabledConfig,allowAgentModelOverrides:true}));
+  const continuedOverride=await run({profileId:"project:empty-worker",task:"PACKED-OVERRIDE-CONTINUE",continueId:retainedId});
+  assert.equal(continuedOverride.details.status,"completed",JSON.stringify(continuedOverride));
+  assert.equal(continuedOverride.details.response.model.id,alternateId);
+  assert.equal(continuedOverride.details.response.continuationId,retainedId);
+  await task("release",retainedId);
+  faux.setResponses([fauxAssistantMessage("SHORT-BACKGROUND")]);
+  const shortLaunch=await run({...requested,background:true});
+  const shortId=shortLaunch.details.runId;
+  assert.equal(await waitForTask(shortId),"completed");
+  const shortStatus=await task("status",shortId);
+  assert.ok(shortStatus.details.tasks[0].continuationId);
+  assert.equal((await task("release",shortId)).details.taskId,shortId);
+  const shortResult=await task("result",shortId);
+  assert.equal(shortResult.details.response.runId,shortId);
+  assert.equal(shortResult.details.usageCredited,true);
+  assert.doesNotMatch(JSON.stringify(shortResult.content),/Retained child:/);
+  assert.equal((await task("result",shortId)).details.usageCredited,false);
+  assert.deepEqual((await task("contexts")).details.contexts,[]);
+  writeFileSync(configPath,JSON.stringify(enabledConfig));
+
   // Real host policy -> exact child tool surface, relative paths and retained history.
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("read", { path: "relative.txt" }, { id: "relative-read" })),

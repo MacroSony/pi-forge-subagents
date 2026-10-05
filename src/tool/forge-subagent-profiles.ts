@@ -6,6 +6,8 @@ import type { ForgeHostSession } from "../host/session.ts";
 import { DEFAULT_SUBAGENT_TIMEOUT_MS, loadForgeSubagentSettings, resolveSubagentProfilePolicy, type ForgeSubagentSettings, type ResolvedSubagentProfilePolicy } from "../config/subagents.ts";
 
 const MAX_VISIBLE_DESCRIPTION_CHARS = 1_000;
+const MODEL_OVERRIDES_ALLOWED_TEXT = "allowed (permission only; nothing switches automatically). A run may pass model provider/id and/or thinkingLevel; omitted fields use the profile values above (or retained child settings when continuing). An unsupported model or thinking level is an error with no fallback. Overrides can change cost and which provider receives prompt data.";
+const MODEL_OVERRIDES_DISALLOWED_TEXT = "not allowed for unattended calls; model/thinkingLevel parameters require interactive approval. Omitted fields use the profile defaults.";
 const ForgeSubagentProfilesParameters = Type.Object({});
 
 export interface ForgeSubagentProfileSummary {
@@ -17,6 +19,8 @@ export interface ForgeSubagentProfileSummary {
 	promptStack: string | null;
 	backend: { id: string; source: string };
 	timeout: { milliseconds: number; source: string };
+	/** Effective permission for agent-supplied single-run model (provider/id) and thinkingLevel overrides; not an automatic model switch. */
+	allowAgentModelOverrides: boolean;
 	status: "ready" | "unavailable";
 	diagnostics: Array<{ level: string; message: string; field?: string }>;
 }
@@ -148,6 +152,7 @@ export function summarizeProfile(
 		promptStack: profile.promptStack,
 		backend: structuredClone(policy.backend),
 		timeout: structuredClone(policy.timeout),
+		allowAgentModelOverrides: policy.allowAgentModelOverrides === true,
 		status: profile.usable ? "ready" : "unavailable",
 		diagnostics: structuredClone(profile.diagnostics),
 	};
@@ -203,6 +208,7 @@ function renderProfile(profile: ForgeSubagentProfileSummary, includeErrors = fal
 		title,
 		`  Description: ${description}`,
 		`  Model: ${profile.model.provider}/${profile.model.id}; thinking: ${profile.thinkingLevel}; stack: ${profile.promptStack ?? "none"}`,
+		`  Unattended model/thinking overrides: ${profile.allowAgentModelOverrides ? MODEL_OVERRIDES_ALLOWED_TEXT : MODEL_OVERRIDES_DISALLOWED_TEXT}`,
 		`  Execution: backend ${profile.backend.id} (${profile.backend.source}); timeout ${profile.timeout.milliseconds} ms (${profile.timeout.source}; best-effort host abort)`,
 	];
 	if (includeErrors) {
@@ -246,7 +252,7 @@ export function renderEmbeddedSummaryText(summaries: readonly ForgeSubagentProfi
 function embeddedProfileLine(profile: ForgeSubagentProfileSummary): string {
 	const label = profile.name ? `${profile.id} — ${compact(profile.name)}` : profile.id;
 	const target = `${profile.model.provider}/${profile.model.id} · thinking ${profile.thinkingLevel} · stack ${profile.promptStack ?? "none"}`;
-	const execution = `backend ${profile.backend.id} · ${profile.timeout.milliseconds}ms`;
+	const execution = `backend ${profile.backend.id} · ${profile.timeout.milliseconds}ms · unattended model/thinking overrides ${profile.allowAgentModelOverrides ? "allowed" : "off"}`;
 	if (profile.status === "ready") return `${label}: ${target}; ${execution}`;
 	const reason = profile.diagnostics.find((diagnostic) => diagnostic.level === "error")?.message ?? "profile resolution failed";
 	return `${label}: ${target}; ${execution} (unavailable: ${compact(reason)})`;

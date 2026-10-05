@@ -27,10 +27,15 @@ const ForgeSubagentParameters = Type.Object({
 	profileId: Type.String({ minLength: 1, description: "ID of a Pi Forge agent profile enabled for subagent delegation." }),
 	task: Type.String({ minLength: 1, description: "The focused task to delegate to the subagent." }),
 	backend: Type.Optional(Type.String({ minLength: 1, description: "Backend ID to execute through (interactive runs only)." })),
-	model: Type.Optional(Type.String({ minLength: 1, description: "Model provider/id to execute through (interactive runs only)." })),
+	model: Type.Optional(Type.String({ minLength: 1, description: "Per-run provider/id. Unattended use requires allowAgentModelOverrides; omitted uses profile defaults or retained child settings. Unsupported models fail without fallback." })),
+	thinkingLevel: Type.Optional(Type.Union([Type.Literal("off"), Type.Literal("minimal"), Type.Literal("low"), Type.Literal("medium"), Type.Literal("high"), Type.Literal("xhigh"), Type.Literal("max")], { description: "Per-run thinking level. Same opt-in as model; unsupported levels fail rather than clamp. Retained children cannot change model or thinking." })),
 });
 
 export type ForgeSubagentModelOverride = { provider: string; id: string };
+export const FORGE_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export function isForgeThinkingLevel(value: unknown): value is typeof FORGE_THINKING_LEVELS[number] {
+	return typeof value === "string" && (FORGE_THINKING_LEVELS as readonly string[]).includes(value);
+}
 
 export function parseForgeSubagentModel(value: string): { ok: true; model: ForgeSubagentModelOverride } | { ok: false; error: string } {
 	const trimmed = value.trim();
@@ -103,7 +108,7 @@ export function renderApprovalSummary(prepared: ForgeSubagentPreparedRun, task: 
 		`Context: ${prepared.continueId ? `continue ${prepared.continueId}` : prepared.keepContext ? "retain new in-process child" : "one-shot"}`,
 		`Backend: ${plan.backendId}`,
 		`Model: ${plan.model.provider}/${plan.model.id}`,
-		`Thinking: ${plan.profile.profile.thinkingLevel}`,
+		`Thinking: ${plan.thinkingLevel}`,
 		`Prompt stack: ${plan.profile.promptStackId ?? "(none)"}`,
 		`System prompt chars: ${plan.systemPrompt.length}`,
 		`Messages: ${plan.messages.length}`,
@@ -203,6 +208,10 @@ export function registerForgeSubagentTool(
 					modelOverride = parsedModel.model;
 				}
 
+				if (params.thinkingLevel !== undefined && !isForgeThinkingLevel(params.thinkingLevel)) {
+					return { content: toolContent(`Invalid thinkingLevel. Use one of: ${FORGE_THINKING_LEVELS.join(", ")}.`), details: { ...baseDetails, status: "failed" } };
+				}
+
 				const session = options.sessionProvider();
 				if (!session) {
 					return { content: toolContent("pi-forge-subagents: no Forge host session (start a session first)."), details: { ...baseDetails, status: "failed" } };
@@ -216,9 +225,9 @@ export function registerForgeSubagentTool(
 						details: { ...baseDetails, status: "failed" },
 					};
 				}
-				if (!approvalRequired && modelOverride) {
+				if (!approvalRequired && (modelOverride || params.thinkingLevel !== undefined) && !policy.allowAgentModelOverrides) {
 					return {
-						content: toolContent(`Subagent invocation was not run: unattended invocation is pinned to the profile/configured model. To use "${params.model}", run interactively or change the trusted subagent configuration.`),
+						content: toolContent("Subagent invocation was not run: unattended invocation is pinned to the profile/configured model and thinking level. Enable allowAgentModelOverrides in trusted subagent configuration or use an interactively approved run."),
 						details: {
 							...baseDetails,
 							status: "failed",
@@ -260,6 +269,7 @@ export function registerForgeSubagentTool(
 						...(params.continueId ? { continueId: params.continueId } : {}),
 						keepContext: Boolean(params.keepContext || params.continueId),
 						...(modelOverride ? { model: modelOverride } : {}),
+						...(params.thinkingLevel !== undefined ? { thinkingLevel: params.thinkingLevel } : {}),
 					});
 					if (!preparation.ok) {
 						const diagnostics = [...configDiagnostics, ...preparation.diagnostics];
@@ -301,6 +311,7 @@ export function registerForgeSubagentTool(
 							approved: true,
 							viewedFullPrompt: approval.viewedFullPrompt,
 							source: approvalRequired ? "human" : "trusted-project-config",
+							// Structured audit receipt, not emitted in model-facing content.
 							executionFingerprint: prepared.plan.executionFingerprint,
 							approvedAt,
 						},
@@ -414,8 +425,8 @@ function forgeSubagentToolDescription(embedded?: string): string {
 		"Runs require human approval after exact preparation unless the trusted project explicitly enables unattended agent invocation.",
 		"The child receives only backend-approved tools. Read-only process backends use the invoking user boundary; pi-bwrap-write runs isolated and directly modifies the selected git workspace.",
 		"The optional backend parameter selects the execution backend for interactively approved runs; unattended invocation always uses the configured default backend.",
-		"The optional model parameter selects the execution model (provider/id) for interactively approved runs; unattended invocation is pinned to the profile/configured model.",
-		"Use keepContext for same-parent in-process continuation, then continueId with the same profile. Use background to launch without waiting and forge_subagent_task to inspect/collect/cancel; release retained contexts explicitly. No handles survive parent session shutdown.",
+		"model (provider/id) and thinkingLevel select per-run settings. Unattended overrides require the trusted allowAgentModelOverrides opt-in; otherwise they are rejected. Omitted fields keep the profile defaults (or a retained child's settings). Unsupported choices fail; no automatic fallback or clamping.",
+		"Use keepContext for same-parent in-process continuation, then continueId with the same profile. Use background to launch without waiting and forge_subagent_task to inspect/collect/cancel; list retained contexts with action contexts and release by context ID or a finished background task ID. Keep the same model/thinking when continuing. Task/context handles are short and session-local; no handles survive parent session shutdown.",
 		"Use the final report as evidence and do not repeatedly request the same rejected delegation.",
 	].join(" ");
 	return embedded ? `${lines}\n\n${embedded}` : lines;

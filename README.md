@@ -75,8 +75,9 @@ by default; `FORGE_EXPECT_LEGACY_RUNTIME=1` is only for an explicit legacy probe
 ## Surfaces
 
 - `forge_subagent_profiles`: model-callable, no-egress discovery of enabled profiles.
-- `forge_subagent`: model-callable foreground delegation with approval.
-- `/forge subagent help|list|backends|config|plan|run|status|result|cancel|release`: canonical human command lane
+- `forge_subagent`: model-callable foreground/background delegation with approval or trusted unattended configuration.
+- `forge_subagent_task`: status/result/cancel, metadata-only contexts listing, and retained-context release.
+- `/forge subagent help|list|backends|config|plan|run|status|result|cancel|contexts|release`: canonical human command lane
   contributed directly to `/forge` for profile discovery, dry planning, approved execution (foreground or background),
   background task management, and child continuation lifecycle.
   A compatible `/forge-agent` command is also registered directly.
@@ -115,6 +116,62 @@ profile:
   }
 }
 ```
+
+### One worker, per-run model and thinking
+
+`allowAgentModelOverrides` is **false by default**. Enable it in trusted global
+or project configuration to let unattended model calls supply `model`
+(`provider/id`) and/or `thinkingLevel`. It does not enable delegation by itself:
+`allowAgentInvocationWithoutApproval` and the profile's `enabled` setting still
+apply. A per-profile boolean overrides the effective top-level default:
+
+```json
+{
+  "allowAgentInvocationWithoutApproval": true,
+  "profiles": {
+    "global:minimal-worker": {
+      "enabled": true,
+      "backend": "pi-inprocess",
+      "allowAgentModelOverrides": true
+    }
+  }
+}
+```
+
+The parent can then call one profile with different settings for independent
+children, without creating a separate profile for each model:
+
+```json
+{
+  "profileId": "global:minimal-worker",
+  "model": "openai-codex/gpt-6.1-sol",
+  "thinkingLevel": "high",
+  "task": "Review the patch without editing files."
+}
+```
+
+- Omitted fields retain the saved profile defaults. Overrides never rewrite a
+  profile. When continuing a retained child, omission preserves that child's
+  effective model/thinking instead.
+- Thinking values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`,
+  subject to the selected model's actual support. Unknown/unavailable models or
+  unsupported thinking levels fail preflight: no model fallback or silent
+  thinking clamp.
+- This grant is not a model allowlist: any host-available model supported by the
+  configured backend may be selected. It can change cost and which provider
+  receives delegated prompt data. It does **not** change backend, tool, cwd,
+  trust, or egress-policy boundaries.
+- Omitting a config field inherits it; an explicit non-boolean (including null)
+  sets that layer's field false with a warning. Existing config-layer precedence
+  remains unchanged; malformed whole files are still ignored with a warning.
+- Permission is checked again before execution after awaited preparation or
+  approval work. A non-default retained model/thinking combination cannot be
+  continued unattended once its override permission is revoked. Explicitly
+  changing a retained child's model/thinking requires a new child.
+- Interactive runs can propose overrides without this unattended grant, but
+  still require approval of the exact effective model/thinking plan.
+- Both scoped web settings pages and profile rows expose Inherit/Enabled/Disabled;
+  `forge_subagent_profiles` shows the effective unattended override permission.
 
 `pi-bwrap-write` is an opt-in Linux backend. Selecting it is the write
 authorization: it projects isolated `workspace-write` access, exposes
@@ -168,10 +225,10 @@ the human subagent command interface.
 /forge subagent config
 
 # Dry planning (validates full delegated request without provider transport)
-/forge subagent plan <profile> [--backend <id>] [--cwd <path>] [--keep-context] [--continue <id>] [--] <task>
+/forge subagent plan <profile> [--backend <id>] [--model <provider/id>] [--thinking <level>] [--cwd <path>] [--keep-context] [--continue <id>] [--] <task>
 
 # Execution (requires interactive human approval)
-/forge subagent run <profile> [--backend <id>] [--cwd <path>] [--keep-context] [--continue <id>] [--background] [--] <task>
+/forge subagent run <profile> [--backend <id>] [--model <provider/id>] [--thinking <level>] [--cwd <path>] [--keep-context] [--continue <id>] [--background] [--] <task>
 
 # Background task management
 /forge subagent status [id]
@@ -179,22 +236,24 @@ the human subagent command interface.
 /forge subagent cancel <id>
 
 # In-process session continuation release
-/forge subagent release <continueId>
+/forge subagent contexts
+/forge subagent release <context-or-task-id>
 ```
 
 ### Options
 
 - `--backend <id>`, `--backend=<id>`: Select an execution backend before the task.
 - `--cwd <path>`, `--cwd=<path>`: Specify the target working directory for the subagent run. Quoted paths with spaces (e.g. `--cwd "/path with spaces/project"`) are fully supported.
+- `--model <provider/id>` / `--thinking <level>`: Per-run overrides; CLI execution still always requires human approval.
 - `--keep-context`: Retain the child session in memory after a successful turn for subsequent continuation turns.
 - `--continue <id>`, `--continue=<id>`: Continue a previously retained in-process child session. Specifying `--continue` automatically implies context retention (`keepContext: true`).
 - `--background`: Launch the subagent in the background after explicit interactive human approval (`run` only; rejected for `plan`).
 - `--`: Delimiter marking the beginning of the task text. Preserves literal flags, whitespace, and quotes without shell interpretation.
 
-Model tools expose the same options as `cwd`, `keepContext`, `continueId`, and
+Model tools expose the same options as `model`, `thinkingLevel`, `cwd`, `keepContext`, `continueId`, and
 `background` on `forge_subagent`. Use `forge_subagent_task` with `action`
-`status` / `result` / `cancel` and a run `id`, or `release` and a continuation
-`id`. These are new tool schemas: install the matching runtime + optional
+`status` / `result` / `cancel` and a task `id`, `contexts` for retained-context metadata,
+or `release` and a context or finished background-task `id`. These are new tool schemas: install the matching runtime + optional
 artifacts and restart/reload the test host before trying them. Published beta.4
 runtime rejects context retention explicitly rather than pretending to resume.
 
@@ -210,9 +269,11 @@ remain billable even when cleanup fails.
 ### In-process continuation lifecycle
 
 - **Backend restriction**: In-process child session continuation (`--keep-context`, `--continue`, and `release`) is supported only on the `pi-inprocess` backend. `pi-bwrap-write` and fresh-process backends do not support session continuation.
-- **Parent lifetime**: Continuation handles are stored in the host parent process memory and are strictly private to the owning parent session. They do not survive host session reloads, session switches/forks that create a new session, or process restarts. Navigating branches within the same session does not clone the child: a handle still refers to one serialized conversation.
-- **Full context, no automatic summary**: Retained children disable automatic compaction in memory; if context limits are reached, start a new child instead of silently replacing history with a summary. Model/tool/profile/system changes require a new child.
-- **Explicit release**: To free memory before session exit, invoke `/forge subagent release <continueId>`.
+- **Parent lifetime**: Continuation handles are stored in the host parent process memory and are strictly private to the owning parent session. They do not survive host session reloads, session switches/forks that create a new session, or process restarts. Navigating branches within the same session does not clone the child: a handle still refers to one serialized conversation. Context handles and continuation are session-wide: explicitly continuing a child from another branch shares its prior history. Branches are not a confidentiality boundary. The background `result` branch gate prevents accidental output/usage collection on the wrong branch; it is not an ACL against explicit continuation.
+- **Full context, no automatic summary**: Retained children disable automatic compaction in memory; if context limits are reached, start a new child instead of silently replacing history with a summary. Model/thinking/tool/profile/system changes require a new child.
+- **Explicit release**: Use `/forge subagent contexts` to discover retained handles, then `/forge subagent release <context-or-task-id>`. Listing/release are owner-session controls, not result collection: they do not return transcript/output or claim usage, and can be used from another branch. Release preserves uncollected task output and its one-time usage receipt. Running task release rejects rather than silently cancelling; busy/prepared retained contexts must become idle first.
+- **Short, opaque handles**: Public task IDs use `t-<short namespace>-<counter>` and context IDs use `c-<short namespace>-<counter>`. They are generated by the host, not guessed or synthesized by the model. A task has the same ID from plan/launch through status and final response. Core runtime UUIDs and fingerprints remain internal/audit data, not values the model must copy. Fresh adapter instances use fresh namespaces so stale pre-reload handles are not recycled into new tasks. These handles are not authorization tokens and do not survive reload/restart.
+
 
 ### Target working directory (`--cwd`)
 

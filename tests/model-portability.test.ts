@@ -101,6 +101,7 @@ test("fresh-process backend rejects an extension-registered provider with stream
 	});
 	try {
 		const preparation = await runtime.prepare("project:worker", "Review the patch.", ctx, {
+			unattended: false, // This suite tests approved model portability, not unattended opt-in.
 			backendId: "pi-subprocess-readonly",
 			model: { provider: "ext-stream", id: "ext-model" },
 		});
@@ -126,6 +127,7 @@ test("built-in provider passes without the diagnostic (facade without probe meth
 	const ctx = fakeCtx(cwd);
 	try {
 		const preparation = await runtime.prepare("project:worker", "Review the patch.", ctx, {
+			unattended: false, // This suite tests approved model portability, not unattended opt-in.
 			backendId: "pi-subprocess-readonly",
 		});
 		assert.equal(preparation.ok, true, preparation.ok ? undefined : preparation.diagnostics.map((d) => d.message).join("; "));
@@ -149,6 +151,7 @@ test("declarative extension provider diagnostic carries the declarative note", a
 	});
 	try {
 		const preparation = await runtime.prepare("project:worker", "Review the patch.", ctx, {
+			unattended: false, // This suite tests approved model portability, not unattended opt-in.
 			backendId: "pi-rpc-readonly",
 			model: { provider: "declarative", id: "declarative-model" },
 		});
@@ -174,6 +177,7 @@ test("provider unknown to every probe method is treated as not extension-registe
 	});
 	try {
 		const preparation = await runtime.prepare("project:worker", "Review the patch.", ctx, {
+			unattended: false, // This suite tests approved model portability, not unattended opt-in.
 			backendId: "pi-subprocess-readonly",
 			model: { provider: "unknown-provider", id: "unknown-model" },
 		});
@@ -197,6 +201,7 @@ test("pi-inprocess does not reject an extension-registered provider", async () =
 	});
 	try {
 		const preparation = await runtime.prepare("project:worker", "Review the patch.", ctx, {
+			unattended: false, // This suite tests approved model portability, not unattended opt-in.
 			backendId: "pi-inprocess",
 			model: { provider: "ext-stream", id: "ext-model" },
 		});
@@ -220,6 +225,7 @@ test("native extension provider is rejected on a fresh-process backend", async (
 	});
 	try {
 		const preparation = await runtime.prepare("project:worker", "Review the patch.", ctx, {
+			unattended: false, // This suite tests approved model portability, not unattended opt-in.
 			backendId: "pi-subprocess-readonly",
 			model: { provider: "native-ext", id: "native-model" },
 		});

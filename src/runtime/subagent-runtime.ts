@@ -51,6 +51,7 @@ import {
 } from "../contract/index.ts";
 import type { ForgePrepareResponse } from "@zihanw/pi-forge/subagent";
 import type { ForgeHostSession } from "../host/session.ts";
+import { createPublicHandleAllocator } from "./public-handles.ts";
 import {
 	MAX_SUBAGENT_TIMEOUT_MS,
 	MIN_SUBAGENT_TIMEOUT_MS,
@@ -89,6 +90,7 @@ export interface ForgeSubagentRuntimePrepareOptions {
 	backendId?: string;
 	timeoutMs?: number;
 	model?: { provider: string; id: string };
+	thinkingLevel?: string;
 	cwd?: string;
 	unattended?: boolean;
 	/** Keep the in-process child session after a successful run. */
@@ -107,6 +109,14 @@ export interface ForgeSubagentContinuationInfo {
 	profileId: string;
 	backendId: string;
 	cwd: string;
+	model?: { provider: string; id: string };
+	thinkingLevel?: string;
+}
+
+export interface ForgeSubagentContinuationSummary extends ForgeSubagentContinuationInfo {
+	id: string;
+	model: { provider: string; id: string };
+	thinkingLevel: string;
 }
 
 export interface ForgeSubagentRuntime {
@@ -117,6 +127,7 @@ export interface ForgeSubagentRuntime {
 	start?(prepared: ForgeSubagentPreparedRun, ctx: ExtensionContext, signal?: AbortSignal, onUpdate?: (update: SubagentBackendExecutionUpdate) => void): Promise<ForgeSubagentRunHandle>;
 	execute(prepared: ForgeSubagentPreparedRun, ctx: ExtensionContext, signal?: AbortSignal, onUpdate?: (update: SubagentBackendExecutionUpdate) => void): Promise<AgentResponse>;
 	releaseContinuation?(id: string, ctx: ExtensionContext): Promise<void>;
+	listContinuations?(ctx: ExtensionContext): ForgeSubagentContinuationSummary[];
 	continuationInfo?(id: string, ctx: ExtensionContext): ForgeSubagentContinuationInfo | undefined;
 	takeReport?(runId: string): PiSubprocessRunReport | undefined;
 	dispose(): Promise<void>;
@@ -190,6 +201,7 @@ interface RuntimeGeneration {
 
 interface RetainedContinuationRecord {
 	id: string;
+	internalId: string;
 	generation: RuntimeGeneration;
 	parentSessionId: string;
 	profileId: string;
@@ -199,9 +211,14 @@ interface RetainedContinuationRecord {
 	profileFingerprint: string;
 	initialSystemPrompt: string;
 	model: { provider: string; id: string };
+	thinkingLevel: string;
 }
 
 interface PreparedRecord {
+	publicId: string;
+	model: { provider: string; id: string };
+	thinkingLevel: string;
+	initialSystemPrompt: string;
 	generation: RuntimeGeneration;
 	handle: PreparedRun;
 	backend: ReportCapableBackend;
@@ -213,6 +230,7 @@ interface PreparedRecord {
 	continueId?: string;
 	keepContext: boolean;
 	unattended: boolean;
+	requiresModelOverridePermission: boolean;
 	policyBackendId: string;
 	policyTimeoutMs: number;
 	promptStackFingerprint: string | null;
@@ -228,6 +246,7 @@ export function createForgeSubagentRuntime(
 	sessionProvider: () => ForgeHostSession | undefined,
 	options: ForgeSubagentRuntimeOptions = {},
 ): ForgeSubagentRuntime {
+	const allocatePublicHandle = createPublicHandleAllocator();
 	const generations = new Map<string, RuntimeGeneration>();
 	const registryIds = new WeakMap<ModelRegistry, number>();
 	let nextRegistryId = 1;
@@ -408,13 +427,20 @@ export function createForgeSubagentRuntime(
 		if (!session) {
 			return { ok: false, diagnostics: [error("host.session", "No pi-forge host session; start a session first.")] };
 		}
+		if (run?.thinkingLevel !== undefined && (typeof run.thinkingLevel !== "string" || !run.thinkingLevel.trim())) {
+			return { ok: false, diagnostics: [error("host.thinking", "Thinking override must be a non-empty string.")] };
+		}
+		if (run?.model !== undefined && (!run.model || typeof run.model.provider !== "string" || !run.model.provider.trim()
+			|| typeof run.model.id !== "string" || !run.model.id.trim())) {
+			return { ok: false, diagnostics: [error("host.model", "Model override must include non-empty provider and id strings.")] };
+		}
 		const canonicalProfileId = canonicalDelegationProfileId(profileId);
 		const parentSessionId = ctx.sessionManager.getSessionId();
 		const retained = run?.continueId ? continuations.get(run.continueId) : undefined;
 		if (run?.continueId && !retained) {
-			return { ok: false, diagnostics: [error("continuation.unknown", `Unknown continuation handle: ${run.continueId}.`)] };
+			return { ok: false, diagnostics: [error("continuation.unknown", "Unknown continuation handle.")] };
 		}
-		if (retained && retained.parentSessionId !== parentSessionId) {
+		if (retained && !ownsContinuation(retained, ctx)) {
 			return { ok: false, diagnostics: [error("continuation.session", "Continuation handles are private to their owning parent session.")] };
 		}
 		if (retained && retained.profileId !== canonicalProfileId) {
@@ -501,6 +527,17 @@ export function createForgeSubagentRuntime(
 			};
 		}
 
+		const publicRunId = allocatePublicHandle("t");
+		const explicitOverride = run?.model !== undefined || run?.thinkingLevel !== undefined;
+		const checkOverridePermission = (required = explicitOverride): void => {
+			if (!ctx.isProjectTrusted()) throw new Error("Project trust was revoked during preparation.");
+			if (isUnattended && required && !modelOverridesAllowed(ctx, canonicalProfileId)) {
+				throw new Error("Unattended model/thinking overrides are not enabled.");
+			}
+		};
+		try { checkOverridePermission(); } catch (authorizationError) {
+			return { ok: false, diagnostics: [error("host.model-override", publicErrorMessage(authorizationError))] };
+		}
 		const current = ensure(ctx, canonicalTargetCwd);
 		const prepareEpoch = current.epoch;
 		// A replaced generation must finish tearing down before we start preparing
@@ -508,6 +545,10 @@ export function createForgeSubagentRuntime(
 		await disposalChain;
 		if (prepareEpoch !== lifecycleEpoch || current.epoch !== lifecycleEpoch) {
 			return { ok: false, diagnostics: [error("runtime.stale", "Subagent preparation was superseded by a parent session or target change.")] };
+		}
+
+		try { checkOverridePermission(); } catch (authorizationError) {
+			return { ok: false, diagnostics: [error("host.model-override", publicErrorMessage(authorizationError))] };
 		}
 
 		let snapshot: AgentProfileSnapshot;
@@ -522,6 +563,7 @@ export function createForgeSubagentRuntime(
 				diagnostics.push(...snapshotDiagnostics);
 				return { ok: false, diagnostics };
 			}
+			checkOverridePermission();
 			snapshot = resolved.snapshot as AgentProfileSnapshot;
 		} catch (resolveError) {
 			diagnostics.push(error("host.profile-missing", resolveError instanceof Error ? resolveError.message : String(resolveError)));
@@ -563,22 +605,24 @@ export function createForgeSubagentRuntime(
 		if (retained && retained.profileFingerprint !== snapshot.profileFingerprint) {
 			return { ok: false, diagnostics: [error("continuation.profile-changed", "Profile changed; start a new child.")] };
 		}
-		if (retained && isUnattended && (retained.backendId !== policy.backend.id || retained.model.provider !== snapshot.profile.model.provider || retained.model.id !== snapshot.profile.model.id)) {
-			return { ok: false, diagnostics: [error("continuation.policy-changed", "Unattended continuation must still match its configured backend/model.")] };
+		if (retained && isUnattended && retained.backendId !== policy.backend.id) {
+			return { ok: false, diagnostics: [error("continuation.policy-changed", "Unattended continuation must still match its configured backend.")] };
 		}
-		const retainedOverride = retained && (retained.model.provider !== snapshot.profile.model.provider || retained.model.id !== snapshot.profile.model.id)
-			? retained.model
-			: undefined;
-		const selectedModel = run?.model ?? retainedOverride ?? snapshot.profile.model;
-		if (retained && (selectedModel.provider !== retained.model.provider || selectedModel.id !== retained.model.id)) {
-			return { ok: false, diagnostics: [error("continuation.model", "Continuation model changed; prepare a new child.")] };
+		const selectedModel = run?.model ?? retained?.model ?? snapshot.profile.model;
+		const selectedThinking = run?.thinkingLevel ?? retained?.thinkingLevel ?? snapshot.profile.thinkingLevel;
+		if (retained && (selectedModel.provider !== retained.model.provider || selectedModel.id !== retained.model.id || selectedThinking !== retained.thinkingLevel)) {
+			return { ok: false, diagnostics: [error("continuation.model-thinking", "Continuation model/thinking changed; prepare a new child.")] };
 		}
-		const effectiveModelOverride = run?.model ?? retainedOverride;
-		const intent = executionIntentFor(request, snapshot, intentPreset.toolCatalog, effectiveModelOverride, canonicalTargetCwd);
+		const requiresModelOverridePermission = explicitOverride || selectedModel.provider !== snapshot.profile.model.provider
+			|| selectedModel.id !== snapshot.profile.model.id || selectedThinking !== snapshot.profile.thinkingLevel;
+		try { checkOverridePermission(requiresModelOverridePermission); } catch (authorizationError) {
+			return { ok: false, diagnostics: [error("host.model-override", publicErrorMessage(authorizationError))] };
+		}
+		const intent = executionIntentFor(request, snapshot, intentPreset.toolCatalog, selectedModel, canonicalTargetCwd, selectedThinking);
 		if (run?.continueId || run?.keepContext) {
 			(intent as ContinuationIntent).continuation = {
 				retain: true,
-				...(run.continueId ? { id: run.continueId } : {}),
+				...(retained ? { id: retained.internalId } : {}),
 			};
 		}
 		const portability = modelPortabilityDiagnostic(ctx.modelRegistry, intent.model, backendId, freshProcessBackendIds);
@@ -609,7 +653,7 @@ export function createForgeSubagentRuntime(
 						},
 						backend: {
 							model: { provider: promptRuntime.model.provider, id: promptRuntime.model.id },
-							thinkingLevel: (acceptedPreflight.thinkingLevel ?? snapshot.profile.thinkingLevel) as string,
+							thinkingLevel: selectedThinking,
 							toolCatalog: acceptedPreflight.toolCatalog.map((tool) => ({
 								id: tool.id,
 								name: tool.name,
@@ -617,6 +661,7 @@ export function createForgeSubagentRuntime(
 							})),
 						},
 					});
+					checkOverridePermission(requiresModelOverridePermission);
 					if (continuationContext) {
 						// The backend owns the raw transcript. Reauthorization above is
 						// deliberate, but its freshly compiled old task must never replace
@@ -646,9 +691,9 @@ export function createForgeSubagentRuntime(
 		} catch (prepareError) {
 			const nested = (prepareError as { diagnostics?: unknown }).diagnostics;
 			if (Array.isArray(nested)) {
-				diagnostics.push(...(nested as SubagentDiagnostic[]));
+				diagnostics.push(...(nested as SubagentDiagnostic[]).map((diagnostic) => ({ ...diagnostic, message: publicErrorMessage(diagnostic.message, retained) })));
 			} else {
-				diagnostics.push(error("host.preparation", prepareError instanceof Error ? prepareError.message : String(prepareError)));
+				diagnostics.push(error("host.preparation", publicErrorMessage(prepareError, retained)));
 			}
 			return { ok: false, diagnostics };
 		}
@@ -656,6 +701,10 @@ export function createForgeSubagentRuntime(
 		if (prepareEpoch !== lifecycleEpoch || current.epoch !== lifecycleEpoch) {
 			await handle.discard().catch(() => undefined);
 			return { ok: false, diagnostics: [error("runtime.stale", "Subagent preparation was superseded while awaiting backend preparation.")] };
+		}
+		try { checkOverridePermission(requiresModelOverridePermission); } catch (authorizationError) {
+			await handle.discard();
+			return { ok: false, diagnostics: [error("host.model-override", publicErrorMessage(authorizationError))] };
 		}
 		const sealed = handle.snapshot();
 		diagnostics.push(...sealed.preflight.diagnostics);
@@ -669,13 +718,14 @@ export function createForgeSubagentRuntime(
 		// preparation.diagnostics; toolNegotiation.diagnostics is intentionally left
 		// empty), so they must not be re-pushed here.
 		const planned = createAgentExecutionPlan({
-			runId: handle.id,
+			runId: publicRunId,
 			request,
 			snapshot,
 			preflight: preflightForHost(sealed.preflight),
 			preparation: hostPreparation,
 			runtime: sealed.promptRuntime,
-			...(effectiveModelOverride ? { modelOverride: effectiveModelOverride } : {}),
+			modelOverride: selectedModel,
+			thinkingLevelOverride: selectedThinking,
 			conversationFingerprint: sealed.conversationFingerprint,
 			executionFingerprint: sealed.executionFingerprint,
 		});
@@ -684,7 +734,11 @@ export function createForgeSubagentRuntime(
 			await handle.discard();
 			return { ok: false, diagnostics };
 		}
-		prepared.set(handle.id, {
+		prepared.set(publicRunId, {
+			publicId: publicRunId,
+			model: structuredClone(selectedModel),
+			thinkingLevel: selectedThinking,
+			initialSystemPrompt: planned.plan.systemPrompt,
 			generation: current,
 			handle,
 			backend,
@@ -696,6 +750,7 @@ export function createForgeSubagentRuntime(
 			...(run?.continueId ? { continueId: run.continueId } : {}),
 			keepContext: Boolean(run?.keepContext || run?.continueId),
 			unattended: isUnattended,
+			requiresModelOverridePermission,
 			policyBackendId: policy.backend.id,
 			policyTimeoutMs: policy.timeout.milliseconds,
 			promptStackFingerprint: snapshot.promptStackFingerprint,
@@ -721,11 +776,7 @@ export function createForgeSubagentRuntime(
 		await record.handle.discard();
 	}
 
-	async function reauthorizeAfterApproval(record: PreparedRecord, preparedRun: ForgeSubagentPreparedRun, ctx: ExtensionContext): Promise<void> {
-		if (!ctx.isProjectTrusted()) throw new Error("Project trust was revoked after approval.");
-		const session = sessionProvider();
-		if (!session) throw new Error("Forge host session is no longer available.");
-		const resolved = await session.resolveProfile(record.profileId);
+	function reauthorizeAfterApproval(record: PreparedRecord, preparedRun: ForgeSubagentPreparedRun, ctx: ExtensionContext, snapshot: AgentProfileSnapshot): void {
 		// No asynchronous boundary follows these live authorization checks.
 		if (!ctx.isProjectTrusted()) throw new Error("Project trust was revoked after approval.");
 		const sessionId = ctx.sessionManager.getSessionId();
@@ -733,15 +784,16 @@ export function createForgeSubagentRuntime(
 		const settings = loadForgeSubagentSettings(ctx);
 		const policy = resolveSubagentProfilePolicy(settings, record.profileId);
 		if (!policy.enabled) throw new Error(`Agent profile "${record.profileId}" is no longer enabled.`);
+		if (record.unattended && record.requiresModelOverridePermission && policy.allowAgentModelOverrides !== true) throw new Error("Unattended model/thinking overrides were revoked before execution.");
 		if (record.unattended && !settings.allowAgentInvocationWithoutApproval) throw new Error("Unattended approval was revoked before execution.");
 		if (record.unattended && record.canonicalTargetCwd !== canonicalPath(ctx.cwd)
 			&& !(settings.allowedWorkingDirectories?.includes(record.canonicalTargetCwd) ?? false)) {
 			throw new Error(`Target working directory "${record.canonicalTargetCwd}" is no longer allowed.`);
 		}
-		const diagnostics = validateAgentProfileSnapshot(resolved.snapshot);
+		const diagnostics = validateAgentProfileSnapshot(snapshot);
 		if (hasSubagentErrors(diagnostics)) throw new Error("The current profile snapshot is invalid.");
-		if (resolved.snapshot.profileFingerprint !== record.profileFingerprint ||
-			resolved.snapshot.promptStackFingerprint !== record.promptStackFingerprint) {
+		if (snapshot.profileFingerprint !== record.profileFingerprint ||
+			snapshot.promptStackFingerprint !== record.promptStackFingerprint) {
 			throw new Error("Agent profile changed after approval; prepare a new child.");
 		}
 		if (policy.backend.id !== record.policyBackendId || policy.timeout.milliseconds !== record.policyTimeoutMs) {
@@ -770,7 +822,14 @@ export function createForgeSubagentRuntime(
 		if (record.generation !== current || startEpoch !== lifecycleEpoch || current.epoch !== lifecycleEpoch) {
 			throw new Error("Subagent prepared run belongs to a previous runtime generation.");
 		}
-		await reauthorizeAfterApproval(record, preparedRun, ctx);
+		if (!ctx.isProjectTrusted()) throw new Error("Project trust was revoked after approval.");
+		const session = sessionProvider();
+		if (!session) throw new Error("Forge host session is no longer available.");
+		const resolved = await session.resolveProfile(record.profileId);
+		reauthorizeAfterApproval(record, preparedRun, ctx, resolved.snapshot as AgentProfileSnapshot);
+		if (canonicalPath(ctx.cwd) !== current.parentCwd || ctx.modelRegistry !== current.modelRegistry) {
+			throw new Error("Parent context changed during approval.");
+		}
 		if (startEpoch !== lifecycleEpoch) throw new Error("Subagent execution was superseded by a session change.");
 		// Repeat path binding after all awaited authorization work, not merely
 		// before it. This is a boundary check, not an OS-atomic path guarantee.
@@ -778,12 +837,13 @@ export function createForgeSubagentRuntime(
 			throw new Error("Target working directory realpath changed during approval (symlink drift detected).");
 		}
 		if (!statSync(record.canonicalTargetCwd).isDirectory()) throw new Error("Target working directory no longer exists.");
-		prepared.delete(preparedRun.plan.runId);
+		prepared.delete(record.publicId);
+		const retained = record.continueId ? continuations.get(record.continueId) : undefined;
 		const run = current.runtime.execute(record.handle);
-		reports.set(run.id, { backend: record.backend, preparedRunId: record.handle.id });
+		reports.set(record.publicId, { backend: record.backend, preparedRunId: record.handle.id });
 		const subscription = onUpdate ? run.subscribe((event) => onUpdate({
 			phase: event.phase,
-			message: event.message,
+			message: publicErrorMessage(event.message, retained),
 			...(event.details === undefined ? {} : { details: event.details }),
 		})) : undefined;
 		let cancelOnAbort: (() => void) | undefined;
@@ -794,12 +854,17 @@ export function createForgeSubagentRuntime(
 		}
 		const result = (async (): Promise<AgentResponse> => {
 			try {
-				const response = responseForHost(preparedRun, await run.result);
+				const response = responseForHost(preparedRun, await run.result, record.publicId);
+				if (response.status === "failed") response.error.message = publicErrorMessage(response.error.message, retained);
 				if (record.continueId && !response.continuationId) continuations.delete(record.continueId);
-				if (response.continuationId && startEpoch === lifecycleEpoch && generations.get(current.key) === current) {
+				if (response.continuationId) {
+					const internalId = response.continuationId;
+					const publicId = record.continueId ?? allocatePublicHandle("c");
+					response.continuationId = publicId;
 					const prior = record.continueId ? continuations.get(record.continueId) : undefined;
-					continuations.set(response.continuationId, {
-						id: response.continuationId,
+					if (startEpoch === lifecycleEpoch && generations.get(current.key) === current) continuations.set(publicId, {
+						id: publicId,
+						internalId,
 						generation: record.generation,
 						parentSessionId: record.parentSessionId,
 						profileId: record.profileId,
@@ -807,8 +872,9 @@ export function createForgeSubagentRuntime(
 						cwd: record.targetCwd,
 						canonicalTargetCwd: record.canonicalTargetCwd,
 						profileFingerprint: record.profileFingerprint,
-						initialSystemPrompt: prior?.initialSystemPrompt ?? preparedRun.plan.systemPrompt,
-						model: prior?.model ?? structuredClone(preparedRun.plan.model),
+						initialSystemPrompt: prior?.initialSystemPrompt ?? record.initialSystemPrompt,
+						model: prior?.model ?? structuredClone(record.model),
+						thinkingLevel: prior?.thinkingLevel ?? record.thinkingLevel,
 					});
 				}
 				return response;
@@ -817,7 +883,7 @@ export function createForgeSubagentRuntime(
 				subscription?.dispose();
 			}
 		})();
-		return { id: run.id, result, cancel: (reason?: string) => run.cancel(reason) };
+		return { id: record.publicId, result, cancel: (reason?: string) => run.cancel(reason) };
 	}
 
 	async function execute(preparedRun: ForgeSubagentPreparedRun, ctx: ExtensionContext, signal?: AbortSignal, onUpdate?: (update: SubagentBackendExecutionUpdate) => void): Promise<AgentResponse> {
@@ -827,15 +893,15 @@ export function createForgeSubagentRuntime(
 
 	function continuationInfo(id: string, ctx: ExtensionContext): ForgeSubagentContinuationInfo | undefined {
 		const record = continuations.get(id);
-		if (!record || record.parentSessionId !== ctx.sessionManager.getSessionId()) return undefined;
-		if (canonicalPath(ctx.cwd) !== record.generation.parentCwd || record.generation !== generations.get(record.generation.key)) return undefined;
-		return { profileId: record.profileId, backendId: record.backendId, cwd: record.canonicalTargetCwd };
+		if (!record || !ownsContinuation(record, ctx)) return undefined;
+		return { profileId: record.profileId, backendId: record.backendId, cwd: record.canonicalTargetCwd,
+			model: structuredClone(record.model), thinkingLevel: record.thinkingLevel };
 	}
 
 	async function releaseContinuation(id: string, ctx: ExtensionContext): Promise<void> {
 		const record = continuations.get(id);
-		if (!record) throw new Error(`Unknown continuation handle: ${id}.`);
-		if (record.parentSessionId !== ctx.sessionManager.getSessionId() || canonicalPath(ctx.cwd) !== record.generation.parentCwd) {
+		if (!record) throw new Error("Unknown continuation handle.");
+		if (!ownsContinuation(record, ctx)) {
 			throw new Error("Continuation handles are private to their owning parent session.");
 		}
 		const runtime = record.generation.runtime as ContinuationAwareRuntime;
@@ -843,8 +909,31 @@ export function createForgeSubagentRuntime(
 		if (typeof runtime.releaseContinuation !== "function" || typeof backend?.releaseContinuation !== "function") {
 			throw new Error("Continuation release requires the new pi-subagent-runtime and pi-inprocess backend release hooks.");
 		}
-		await runtime.releaseContinuation(id);
+		try { await runtime.releaseContinuation(record.internalId); }
+		catch (releaseError) { throw new Error(publicErrorMessage(releaseError, record)); }
 		continuations.delete(id);
+	}
+
+	function ownsContinuation(record: RetainedContinuationRecord, ctx: ExtensionContext): boolean {
+		return record.parentSessionId === ctx.sessionManager.getSessionId()
+			&& canonicalPath(ctx.cwd) === record.generation.parentCwd
+			&& ctx.modelRegistry === record.generation.modelRegistry
+			&& record.generation.epoch === lifecycleEpoch
+			&& record.generation === generations.get(record.generation.key);
+	}
+
+	function listContinuations(ctx: ExtensionContext): ForgeSubagentContinuationSummary[] {
+		return [...continuations.values()].filter((record) => ownsContinuation(record, ctx)).map((record) => ({
+			id: record.id, profileId: record.profileId, backendId: record.backendId, cwd: record.canonicalTargetCwd,
+			model: structuredClone(record.model), thinkingLevel: record.thinkingLevel,
+		}));
+	}
+
+	function publicErrorMessage(value: unknown, retained?: RetainedContinuationRecord): string {
+		let message = value instanceof Error ? value.message : String(value);
+		if (retained) message = message.replaceAll(retained.internalId, retained.id);
+		for (const record of continuations.values()) message = message.replaceAll(record.internalId, record.id);
+		return message;
 	}
 
 	function takeReport(runId: string): PiSubprocessRunReport | undefined {
@@ -871,7 +960,12 @@ export function createForgeSubagentRuntime(
 		await disposalChain;
 	}
 
-	return { backendIds: () => [...backendIds], descriptors, prepare, discard, start, execute, releaseContinuation, continuationInfo, takeReport, dispose };
+	return { backendIds: () => [...backendIds], descriptors, prepare, discard, start, execute, releaseContinuation, continuationInfo, listContinuations, takeReport, dispose };
+}
+
+/** Config lane exposes the opt-in on the resolved profile policy. */
+function modelOverridesAllowed(ctx: ExtensionContext, profileId: string): boolean {
+	return resolveSubagentProfilePolicy(loadForgeSubagentSettings(ctx), profileId).allowAgentModelOverrides === true;
 }
 
 function toPreparationOutput(prepared: ForgePrepareResponse, messages: SubagentPreparedMessage[] = prepared.messages as SubagentPreparedMessage[]): SubagentPreparationOutput {
@@ -906,6 +1000,7 @@ function executionIntentFor(
 	toolCatalog: BackendPreflightAccepted["toolCatalog"],
 	modelOverride?: { provider: string; id: string },
 	targetCwd?: string,
+	thinkingLevelOverride?: string,
 ): ExecutionIntent {
 	const negotiation = negotiateSubagentTools(
 		toolCatalog,
@@ -914,7 +1009,7 @@ function executionIntentFor(
 	);
 	return {
 		model: structuredClone(modelOverride ?? snapshot.profile.model),
-		thinkingLevel: snapshot.profile.thinkingLevel,
+		thinkingLevel: thinkingLevelOverride ?? snapshot.profile.thinkingLevel,
 		requestedTools: negotiation.effectiveToolNames,
 		access: {
 			level: request.access.level,
@@ -1061,7 +1156,7 @@ function preflightForHost(preflight: import("@zihanw/pi-subagent-runtime").Backe
 		preflightId: preflight.preflightId,
 		backend: descriptorForHost(preflight.backend),
 		model: structuredClone(preflight.model),
-		thinkingLevel: (preflight.thinkingLevel ?? "medium") as BackendPreflightAccepted["thinkingLevel"],
+		thinkingLevel: preflight.thinkingLevel as BackendPreflightAccepted["thinkingLevel"],
 		toolCatalog: structuredClone(preflight.toolCatalog) as BackendPreflightAccepted["toolCatalog"],
 		access: structuredClone(preflight.access) as BackendPreflightAccepted["access"],
 		limits: structuredClone(preflight.limits) as BackendPreflightAccepted["limits"],
@@ -1096,12 +1191,12 @@ function portableMessage(message: SubagentPreparedMessage): import("@zihanw/pi-s
 	return { role: message.role, content: structuredClone(message.content) };
 }
 
-function responseForHost(prepared: ForgeSubagentPreparedRun, result: RunResult): AgentResponse {
+function responseForHost(prepared: ForgeSubagentPreparedRun, result: RunResult, publicRunId: string): AgentResponse {
 	const continuationId = (result as RunResult & { continuationId?: string }).continuationId;
 	const common = {
 		schemaVersion: SUBAGENT_CONTRACT_VERSION,
 		requestId: prepared.request.requestId,
-		runId: result.runId,
+		runId: publicRunId,
 		backendId: result.backendId,
 		profileFingerprint: prepared.plan.profile.profileFingerprint,
 		executionFingerprint: result.executionFingerprint,

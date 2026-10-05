@@ -423,3 +423,148 @@ test("malformed whole config files retain the documented ignore-with-warning beh
 		rmSync(globalForgeDir, { recursive: true, force: true });
 	}
 });
+
+function withModelOverrideConfig(globalConfig: unknown, projectConfig: unknown, trusted: boolean, run: (settings: ReturnType<typeof loadForgeSubagentSettings>) => void): void {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-model-override-project-"));
+	const globalForgeDir = mkdtempSync(join(tmpdir(), "pi-forge-subagents-model-override-global-"));
+	const previousGlobalDir = process.env.PI_FORGE_GLOBAL_DIR;
+	try {
+		process.env.PI_FORGE_GLOBAL_DIR = globalForgeDir;
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		if (globalConfig !== undefined) writeFileSync(join(globalForgeDir, "subagents.json"), JSON.stringify(globalConfig), "utf8");
+		if (projectConfig !== undefined) writeFileSync(projectSubagentsConfigPath(cwd), JSON.stringify(projectConfig), "utf8");
+		run(loadForgeSubagentSettings(context(cwd, trusted)));
+	} finally {
+		if (previousGlobalDir === undefined) delete process.env.PI_FORGE_GLOBAL_DIR;
+		else process.env.PI_FORGE_GLOBAL_DIR = previousGlobalDir;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(globalForgeDir, { recursive: true, force: true });
+	}
+}
+
+test("allowAgentModelOverrides defaults to false for top level and every resolved profile", () => {
+	withModelOverrideConfig({ profiles: { "global:reviewer": { enabled: true } } }, { profiles: { "project:worker": { enabled: true } } }, true, (settings) => {
+		assert.equal(settings.allowAgentModelOverrides, false);
+		assert.equal(resolveSubagentProfilePolicy(settings, "project:worker").allowAgentModelOverrides, false);
+		assert.equal(resolveSubagentProfilePolicy(settings, "global:reviewer").allowAgentModelOverrides, false);
+		assert.equal(resolveSubagentProfilePolicy(settings, "project:unconfigured").allowAgentModelOverrides, false);
+		assert.equal(settings.warnings.some((warning) => warning.includes("allowAgentModelOverrides")), false);
+	});
+});
+
+test("allowAgentModelOverrides: profile value beats top level and absent profile value inherits", () => {
+	withModelOverrideConfig(undefined, {
+		allowAgentModelOverrides: true,
+		profiles: {
+			"project:inherits": { enabled: true },
+			"project:off": { enabled: true, allowAgentModelOverrides: false },
+		},
+	}, true, (settings) => {
+		assert.equal(resolveSubagentProfilePolicy(settings, "project:inherits").allowAgentModelOverrides, true);
+		assert.equal(resolveSubagentProfilePolicy(settings, "project:off").allowAgentModelOverrides, false);
+		// Unconfigured profile ids still resolve the top-level value (enabled stays false).
+		const other = resolveSubagentProfilePolicy(settings, "project:other");
+		assert.equal(other.enabled, false);
+		assert.equal(other.allowAgentModelOverrides, true);
+	});
+	withModelOverrideConfig(undefined, {
+		allowAgentModelOverrides: false,
+		profiles: { "project:on": { enabled: true, allowAgentModelOverrides: true } },
+	}, true, (settings) => {
+		assert.equal(resolveSubagentProfilePolicy(settings, "project:on").allowAgentModelOverrides, true);
+		assert.equal(resolveSubagentProfilePolicy(settings, "project:on", "explicit-backend").allowAgentModelOverrides, true);
+		assert.equal(resolveSubagentProfilePolicy(settings, "project:on", "explicit-backend").backend.source, "explicit");
+	});
+});
+
+test("allowAgentModelOverrides: global/project layers merge per field and project can revoke", () => {
+	withModelOverrideConfig(
+		{ allowAgentModelOverrides: true, profiles: { "project:worker": { enabled: true, allowAgentModelOverrides: true } } },
+		{ profiles: { "project:worker": { timeoutMs: 30_000 } } },
+		true,
+		(settings) => {
+			assert.equal(settings.allowAgentModelOverrides, true);
+			const policy = resolveSubagentProfilePolicy(settings, "project:worker");
+			assert.equal(policy.enabled, true);
+			assert.equal(policy.timeout.milliseconds, 30_000);
+			assert.equal(policy.allowAgentModelOverrides, true);
+		},
+	);
+	withModelOverrideConfig(
+		{ allowAgentModelOverrides: true, profiles: { "project:worker": { enabled: true, allowAgentModelOverrides: true } } },
+		{ allowAgentModelOverrides: false, profiles: { "project:worker": { allowAgentModelOverrides: false } } },
+		true,
+		(settings) => {
+			assert.equal(settings.allowAgentModelOverrides, false);
+			assert.equal(resolveSubagentProfilePolicy(settings, "project:worker").allowAgentModelOverrides, false);
+		},
+	);
+});
+
+test("allowAgentModelOverrides: explicit non-booleans including null fail closed with warnings", () => {
+	const nonBooleans: unknown[] = [null, "true", "false", 0, 1, {}, [], ["true"]];
+	for (const value of nonBooleans) {
+		withModelOverrideConfig(
+			{ allowAgentModelOverrides: true, profiles: { "project:worker": { enabled: true, allowAgentModelOverrides: true } } },
+			{ allowAgentModelOverrides: value, profiles: { "project:worker": { allowAgentModelOverrides: value } } },
+			true,
+			(settings) => {
+				const label = JSON.stringify(value);
+				assert.equal(settings.allowAgentModelOverrides, false, label);
+				assert.equal(settings.profiles["project:worker"]?.allowAgentModelOverrides, false, label);
+				assert.equal(resolveSubagentProfilePolicy(settings, "project:worker").allowAgentModelOverrides, false, label);
+				assert.equal(settings.warnings.some((w) => w.includes("project allowAgentModelOverrides must be boolean; set to false")), true, label);
+				assert.equal(settings.warnings.some((w) => w.includes("project profile project:worker allowAgentModelOverrides must be boolean; set to false")), true, label);
+			},
+		);
+	}
+	// A bad profile value fails closed even when the top level is enabled.
+	withModelOverrideConfig(undefined, { allowAgentModelOverrides: true, profiles: { "project:worker": { enabled: true, allowAgentModelOverrides: null } } }, true, (settings) => {
+		assert.equal(resolveSubagentProfilePolicy(settings, "project:worker").allowAgentModelOverrides, false);
+		assert.equal(resolveSubagentProfilePolicy(settings, "project:other").allowAgentModelOverrides, true);
+	});
+});
+
+test("allowAgentModelOverrides: invalid lower layer is overridden by a valid higher layer, legacy is fallback", () => {
+	withModelOverrideConfig({ allowAgentModelOverrides: "bad" }, { allowAgentModelOverrides: true }, true, (settings) => {
+		assert.equal(settings.allowAgentModelOverrides, true);
+		assert.equal(settings.warnings.some((w) => w.includes("global allowAgentModelOverrides must be boolean; set to false")), true);
+	});
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-model-override-legacy-"));
+	const globalForgeDir = mkdtempSync(join(tmpdir(), "pi-forge-subagents-model-override-legacy-global-"));
+	const previousGlobalDir = process.env.PI_FORGE_GLOBAL_DIR;
+	try {
+		process.env.PI_FORGE_GLOBAL_DIR = globalForgeDir;
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		writeFileSync(join(cwd, ".pi", "forge", "config.json"), JSON.stringify({ subagents: { allowAgentModelOverrides: true } }), "utf8");
+		assert.equal(loadForgeSubagentSettings(context(cwd)).allowAgentModelOverrides, true);
+		writeFileSync(projectSubagentsConfigPath(cwd), JSON.stringify({ allowAgentModelOverrides: false }), "utf8");
+		assert.equal(loadForgeSubagentSettings(context(cwd)).allowAgentModelOverrides, false);
+	} finally {
+		if (previousGlobalDir === undefined) delete process.env.PI_FORGE_GLOBAL_DIR;
+		else process.env.PI_FORGE_GLOBAL_DIR = previousGlobalDir;
+		rmSync(cwd, { recursive: true, force: true });
+		rmSync(globalForgeDir, { recursive: true, force: true });
+	}
+});
+
+test("allowAgentModelOverrides: untrusted project cannot grant, revoke, or warn about project values", () => {
+	for (const value of [true, false, null, "x"]) {
+		withModelOverrideConfig(
+			{ allowAgentModelOverrides: true, profiles: { "global:reviewer": { enabled: true } } },
+			{ allowAgentModelOverrides: value, profiles: { "project:worker": { enabled: true, allowAgentModelOverrides: value } } },
+			false,
+			(settings) => {
+				assert.equal(settings.allowAgentModelOverrides, true);
+				assert.equal(settings.profiles["project:worker"], undefined);
+				assert.equal(resolveSubagentProfilePolicy(settings, "project:worker").enabled, false);
+				assert.equal(resolveSubagentProfilePolicy(settings, "global:reviewer").allowAgentModelOverrides, true);
+				assert.equal(settings.warnings.some((w) => w.includes("allowAgentModelOverrides must be boolean")), false);
+			},
+		);
+	}
+	withModelOverrideConfig(undefined, { allowAgentModelOverrides: true, profiles: { "project:worker": { enabled: true, allowAgentModelOverrides: true } } }, false, (settings) => {
+		assert.equal(settings.allowAgentModelOverrides, false);
+		assert.equal(resolveSubagentProfilePolicy(settings, "project:worker").allowAgentModelOverrides, false);
+	});
+});

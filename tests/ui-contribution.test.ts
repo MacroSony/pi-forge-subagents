@@ -63,6 +63,7 @@ function completeValues(overrides: Record<string, unknown> = {}): Record<string,
 		backend: "",
 		timeoutMs: "",
 		allowAgentInvocationWithoutApproval: "inherit",
+		allowAgentModelOverrides: "inherit",
 		summaryInToolDescription: "inherit",
 		profiles: {},
 		...overrides,
@@ -130,9 +131,10 @@ test("scoped values retain absence as inherit instead of materializing effective
 		backend: "pi-rpc-readonly",
 		timeoutMs: "",
 		allowAgentInvocationWithoutApproval: "disabled",
+		allowAgentModelOverrides: "inherit",
 		summaryInToolDescription: "inherit",
 		profiles: {
-			"global:reviewer": { enabled: true, backend: "", timeoutMs: "30000" },
+			"global:reviewer": { enabled: true, backend: "", timeoutMs: "30000", allowAgentModelOverrides: "inherit" },
 		},
 	});
 });
@@ -383,6 +385,135 @@ test("stopped async provider generations cannot write after a replacement provid
 		await oldWrite;
 		assert.equal(JSON.parse(readFileSync(projectSubagentsConfigPath(cwd), "utf8")).backend, "fresh");
 		newProvider.stop();
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("model override setting is tri-state at scope and profile level with cost/data-egress guidance", () => {
+	const schema = buildSubagentSettingsSchema("project", "/project/.pi/forge/subagents.json", catalog, {});
+	const choices = [
+		{ value: "inherit", label: "Inherit" },
+		{ value: "enabled", label: "Enabled" },
+		{ value: "disabled", label: "Disabled" },
+	];
+	const scopeField = schema.fields.find((field) => field.key === "allowAgentModelOverrides")!;
+	assert.equal(scopeField.type, "enum");
+	assert.deepEqual(scopeField.options, choices);
+	assert.match(scopeField.description ?? "", /model \(provider\/id\)/);
+	assert.match(scopeField.description ?? "", /thinkingLevel/);
+	assert.match(scopeField.description ?? "", /cost/);
+	assert.match(scopeField.description ?? "", /provider/);
+	assert.match(scopeField.description ?? "", /not a fallback/);
+	assert.doesNotMatch(scopeField.description ?? "", /allowlist:\s*\[/);
+	const rowField = schema.fields.find((field) => field.key === "profiles")!.recordFields!.find((field) => field.key === "allowAgentModelOverrides")!;
+	assert.equal(rowField.type, "enum");
+	assert.deepEqual(rowField.options, choices);
+	assert.equal(rowField.default, "inherit");
+});
+
+test("model override values reread explicit, absent and invalid stored values fail-closed", () => {
+	const values = scopedConfigToContributionValues({
+		allowAgentModelOverrides: true,
+		profiles: {
+			"project:a": { enabled: true, allowAgentModelOverrides: false },
+			"project:b": { enabled: true },
+			"project:c": { enabled: true, allowAgentModelOverrides: null },
+			"project:d": { enabled: true, allowAgentModelOverrides: "true" },
+			"project:e": { enabled: true, allowAgentModelOverrides: true },
+		},
+	}) as any;
+	assert.equal(values.allowAgentModelOverrides, "enabled");
+	assert.deepEqual(Object.fromEntries(Object.entries(values.profiles).map(([id, row]: [string, any]) => [id, row.allowAgentModelOverrides])), {
+		"project:a": "disabled",
+		"project:b": "inherit",
+		"project:c": "disabled",
+		"project:d": "disabled",
+		"project:e": "enabled",
+	});
+	assert.equal((scopedConfigToContributionValues({ allowAgentModelOverrides: null }) as any).allowAgentModelOverrides, "disabled");
+	assert.equal((scopedConfigToContributionValues({}) as any).allowAgentModelOverrides, "inherit");
+});
+
+test("model override choices save, reread, inherit-delete and preserve untouched/unknown fields", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-model-overrides-"));
+	try {
+		mkdirSync(join(cwd, ".pi", "forge"), { recursive: true });
+		writeFileSync(projectSubagentsConfigPath(cwd), JSON.stringify({
+			futureSetting: { keep: true },
+			allowAgentInvocationWithoutApproval: true,
+			profiles: { "project:worker": { enabled: true, timeoutMs: 40_000, futureProfileSetting: 1, allowAgentModelOverrides: false } },
+		}), "utf8");
+		const written = writeScopedSubagentSettings(context(cwd), "project", completeValues({
+			allowAgentInvocationWithoutApproval: "enabled",
+			allowAgentModelOverrides: "enabled",
+			profiles: { "project:worker": { enabled: true, backend: "", timeoutMs: "40000", allowAgentModelOverrides: "enabled" } },
+		}), catalog);
+		assert.equal(written.ok, true);
+		let saved = JSON.parse(readFileSync(projectSubagentsConfigPath(cwd), "utf8"));
+		assert.equal(saved.allowAgentModelOverrides, true);
+		assert.equal(saved.profiles["project:worker"].allowAgentModelOverrides, true);
+		assert.deepEqual(saved.futureSetting, { keep: true });
+		assert.equal(saved.profiles["project:worker"].futureProfileSetting, 1);
+		const reread = buildSubagentSettingsTabs(context(cwd), catalog)[0]!.values as any;
+		assert.equal(reread.allowAgentModelOverrides, "enabled");
+		assert.equal(reread.profiles["project:worker"].allowAgentModelOverrides, "enabled");
+
+		// A patch that does not mention the setting preserves it, at scope and row level.
+		assert.equal(writeScopedSubagentSettings(context(cwd), "project", {
+			timeoutMs: 50_000,
+			profiles: { "project:worker": { enabled: true, backend: "", timeoutMs: "40000" } },
+		}, catalog).ok, true);
+		saved = JSON.parse(readFileSync(projectSubagentsConfigPath(cwd), "utf8"));
+		assert.equal(saved.allowAgentModelOverrides, true);
+		assert.equal(saved.profiles["project:worker"].allowAgentModelOverrides, true);
+
+		// Disabled is stored explicitly as false; Inherit removes the key.
+		assert.equal(writeScopedSubagentSettings(context(cwd), "project", completeValues({
+			allowAgentModelOverrides: "disabled",
+			profiles: { "project:worker": { enabled: true, backend: "", timeoutMs: "", allowAgentModelOverrides: "disabled" } },
+		}), catalog).ok, true);
+		saved = JSON.parse(readFileSync(projectSubagentsConfigPath(cwd), "utf8"));
+		assert.equal(saved.allowAgentModelOverrides, false);
+		assert.equal(saved.profiles["project:worker"].allowAgentModelOverrides, false);
+
+		assert.equal(writeScopedSubagentSettings(context(cwd), "project", completeValues({
+			profiles: { "project:worker": { enabled: true, backend: "", timeoutMs: "", allowAgentModelOverrides: "inherit" } },
+		}), catalog).ok, true);
+		saved = JSON.parse(readFileSync(projectSubagentsConfigPath(cwd), "utf8"));
+		assert.equal(Object.hasOwn(saved, "allowAgentModelOverrides"), false);
+		assert.equal(Object.hasOwn(saved.profiles["project:worker"], "allowAgentModelOverrides"), false);
+		assert.deepEqual(saved.futureSetting, { keep: true });
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("invalid model override choices are rejected without writing", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-model-overrides-invalid-"));
+	try {
+		for (const bad of [true, null, "yes", ["enabled"], ["disabled"], ["inherit"], { toString: "enabled" }]) {
+			const scope = writeScopedSubagentSettings(context(cwd), "project", completeValues({ allowAgentModelOverrides: bad }), catalog);
+			assert.equal(scope.ok, false);
+			if (!scope.ok) assert.match(scope.errors.allowAgentModelOverrides ?? "", /Inherit, Enabled, or Disabled/);
+			const row = writeScopedSubagentSettings(context(cwd), "project", completeValues({
+				profiles: { "project:worker": { enabled: true, backend: "", timeoutMs: "", allowAgentModelOverrides: bad } },
+			}), catalog);
+			assert.equal(row.ok, false);
+			if (!row.ok) assert.match(row.errors["profiles.project:worker.allowAgentModelOverrides"] ?? "", /Inherit, Enabled, or Disabled/);
+		}
+		assert.equal(existsSync(projectSubagentsConfigPath(cwd)), false);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("untrusted projects cannot save project model override settings", () => {
+	const cwd = mkdtempSync(join(tmpdir(), "pi-forge-subagents-ui-model-overrides-untrusted-"));
+	try {
+		const result = writeScopedSubagentSettings(context(cwd, false), "project", completeValues({ allowAgentModelOverrides: "enabled" }), catalog);
+		assert.equal(result.ok, false);
+		assert.equal(existsSync(projectSubagentsConfigPath(cwd)), false);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

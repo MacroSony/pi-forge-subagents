@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentResponse } from "../contract/index.ts";
-import type { ForgeSubagentPreparedRun, ForgeSubagentRunHandle, ForgeSubagentRuntime } from "./subagent-runtime.ts";
+import type { ForgeSubagentContinuationSummary, ForgeSubagentPreparedRun, ForgeSubagentRunHandle, ForgeSubagentRuntime } from "./subagent-runtime.ts";
 
 export interface BackgroundTaskStatus {
 	id: string;
@@ -8,7 +8,16 @@ export interface BackgroundTaskStatus {
 	cwd?: string;
 	status: "starting" | "running" | AgentResponse["status"];
 	collected: boolean;
+	/** Present only for a terminal task whose retained context is still confirmed alive. */
+	continuationId?: string;
 	error?: string;
+}
+export type ForgeContinuationSummary = ForgeSubagentContinuationSummary;
+export interface BackgroundReleaseResult {
+	/** The retained-context id that was released. */
+	continuationId: string;
+	/** Set when the caller addressed the release through a background task id. */
+	taskId?: string;
 }
 interface Task extends BackgroundTaskStatus {
 	sessionId: string;
@@ -76,8 +85,41 @@ export class ForgeBackgroundTasks {
 	}
 
 	status(ctx: ExtensionContext, id?: string): BackgroundTaskStatus[] {
-		if (id) return [publicStatus(this.owned(ctx, id))];
-		return [...this.tasks.values()].filter((task) => this.sameOwner(task, ctx)).map(publicStatus);
+		if (id) return [this.view(this.owned(ctx, id), ctx)];
+		return [...this.tasks.values()].filter((task) => this.sameOwner(task, ctx)).map((task) => this.view(task, ctx));
+	}
+
+	/** Lists retained contexts of this parent session; does not claim results or usage. */
+	contexts(ctx: ExtensionContext): ForgeContinuationSummary[] {
+		const list = this.runtime.listContinuations;
+		if (!list) throw new Error("Listing retained contexts requires the updated runtime adapter.");
+		return list.call(this.runtime, ctx).map((entry) => ({
+			id: entry.id, profileId: entry.profileId, backendId: entry.backendId, cwd: entry.cwd,
+			model: { provider: entry.model.provider, id: entry.model.id }, thinkingLevel: entry.thinkingLevel,
+		}));
+	}
+
+	/**
+	 * Release a retained context by continuation id, or by the id of a finished
+	 * same-parent background task. Cleanup is deliberately independent of the
+	 * result branch gate and never marks the task collected, drops its response
+	 * or touches usage accounting.
+	 */
+	async release(ctx: ExtensionContext, id: string): Promise<BackgroundReleaseResult> {
+		if (!this.runtime.releaseContinuation) throw new Error("Continuation release requires the updated runtime adapter.");
+		const task = this.tasks.get(id);
+		if (!task || !this.sameOwner(task, ctx)) {
+			await this.runtime.releaseContinuation(id, ctx);
+			return { continuationId: id };
+		}
+		if (task.status === "starting" || task.status === "running") {
+			throw new Error(`Task ${id} is still ${task.status}; cancel it (and wait for it to finish) before releasing its context.`);
+		}
+		const continuationId = task.response?.continuationId;
+		if (!continuationId) throw new Error(`Task ${id} has no retained context to release.`);
+		if (!this.alive(continuationId, ctx)) throw new Error(`Retained context of task ${id} was already released or expired.`);
+		await this.runtime.releaseContinuation(continuationId, ctx);
+		return { continuationId, taskId: id };
 	}
 
 	result(ctx: ExtensionContext, id: string, claimUsage = true): BackgroundTaskResult {
@@ -92,19 +134,30 @@ export class ForgeBackgroundTasks {
 		const creditUsage = ready && Boolean(task.response) && claimUsage && !task.collected;
 		// Synchronous claim: concurrent result tools cannot both emit usage.
 		if (ready && claimUsage) task.collected = true;
-		return { task: publicStatus(task), ...(task.response ? { response: structuredClone(task.response) } : {}), creditUsage };
+		return { task: this.view(task, ctx), ...(task.response ? { response: structuredClone(task.response) } : {}), creditUsage };
 	}
 
 	async cancel(ctx: ExtensionContext, id: string): Promise<BackgroundTaskStatus> {
 		const task = this.owned(ctx, id);
 		if (task.status === "starting") throw new Error("Task is still starting; retry cancellation once the launch returns.");
 		await task.handle?.cancel("Cancelled by parent request.");
-		return publicStatus(task);
+		return this.view(task, ctx);
 	}
 
 	/** Invalidate results immediately; runtime.dispose() drains actual child work. */
 	clear(): void { this.epoch++; this.tasks.clear(); }
 
+	private alive(continuationId: string, ctx: ExtensionContext): boolean {
+		// Legacy adapters cannot confirm liveness; production runtimes can.
+		if (!this.runtime.continuationInfo) return true;
+		try { return this.runtime.continuationInfo(continuationId, ctx) !== undefined; } catch { return false; }
+	}
+	private view(task: Task, ctx: ExtensionContext): BackgroundTaskStatus {
+		const status = publicStatus(task);
+		const continuationId = task.response?.continuationId;
+		if (continuationId && this.alive(continuationId, ctx)) status.continuationId = continuationId;
+		return status;
+	}
 	private sameOwner(task: Task, ctx: ExtensionContext): boolean {
 		return task.sessionId === ctx.sessionManager.getSessionId() && task.parentCwd === ctx.cwd;
 	}

@@ -6,7 +6,7 @@ import type { ForgeHostSession } from "../host/session.ts";
 import type { AgentResponse } from "../contract/index.ts";
 import { backgroundTasksFor } from "../runtime/background-tasks.ts";
 import type { ForgeSubagentPreparedRun, ForgeSubagentRunHandle, ForgeSubagentRuntime } from "../runtime/subagent-runtime.ts";
-import { requestForgeSubagentApproval } from "../tool/forge-subagent.ts";
+import { FORGE_THINKING_LEVELS, isForgeThinkingLevel, parseForgeSubagentModel, requestForgeSubagentApproval } from "../tool/forge-subagent.ts";
 import { canonicalProfileId, summarizeProfile } from "../tool/forge-subagent-profiles.ts";
 
 const registeredApis = new WeakSet<ExtensionAPI>();
@@ -76,6 +76,15 @@ export function createForgeAgentCommandHandler(
 			return;
 		}
 
+		if (command === "contexts") {
+			if (rawRest.trim()) { ctx.ui.notify("Usage: /forge-agent contexts", "warning"); return; }
+			try {
+				const contexts = backgroundTasksFor(runtime).contexts(ctx);
+				await showText(ctx, "pi-forge retained contexts", contexts.map((c) => `${c.id}: ${c.profileId} ${c.model.provider}/${c.model.id} thinking:${c.thinkingLevel} cwd:${c.cwd}`).join("\n") || "No retained contexts in this parent session.");
+			} catch (error) { ctx.ui.notify(`pi-forge-subagents: ${error instanceof Error ? error.message : String(error)}`, "error"); }
+			return;
+		}
+
 		if (command === "status") {
 			const tokens = tokenize(rawRest);
 			if (tokens.length > 1) {
@@ -120,11 +129,11 @@ export function createForgeAgentCommandHandler(
 		if (command === "release") {
 			const tokens = tokenize(rawRest);
 			if (tokens.length === 0) {
-				ctx.ui.notify("Usage: /forge-agent release <continueId>", "warning");
+				ctx.ui.notify("Usage: /forge-agent release <context-or-task-id>", "warning");
 				return;
 			}
 			if (tokens.length > 1) {
-				ctx.ui.notify("Subcommand 'release' accepts exactly one continuation ID argument.", "warning");
+				ctx.ui.notify("Subcommand 'release' accepts exactly one context or finished-task ID argument.", "warning");
 				return;
 			}
 			const continueId = stripQuotes(tokens[0]!.token);
@@ -167,6 +176,8 @@ export function createForgeAgentCommandHandler(
 				unattended: false,
 				keepContext: parsed.keepContext,
 				continueId: parsed.continueId,
+				model: parsed.model,
+				thinkingLevel: parsed.thinkingLevel,
 			});
 			if (!preparation.ok) {
 				await showText(ctx, "pi-forge subagent diagnostics", renderDiagnostics(preparation.diagnostics));
@@ -230,7 +241,7 @@ export function createForgeAgentArgumentCompletions(
 				const defaultCommands = ["backends", "config", "help", "list", "plan", "run"];
 				return defaultCommands.map((cmd) => ({ value: cmd, label: cmd }));
 			}
-			const allCommands = ["backends", "cancel", "config", "help", "list", "plan", "release", "result", "run", "status"];
+			const allCommands = ["backends", "cancel", "config", "contexts", "help", "list", "plan", "release", "result", "run", "status"];
 			const matches = allCommands.filter((cmd) => cmd.startsWith(trimmed));
 			return matches.length > 0 ? matches.map((cmd) => ({ value: cmd, label: cmd })) : null;
 		}
@@ -343,11 +354,11 @@ function hasTaskStarted(completedTokens: readonly TokenSpan[]): boolean {
 	for (let i = 0; i < completedTokens.length; i++) {
 		const t = completedTokens[i]!.token;
 		if (t === "--") return true;
-		if (t === "--backend" || t === "--cwd" || t === "--continue") {
+		if (t === "--backend" || t === "--cwd" || t === "--continue" || t === "--model" || t === "--thinking") {
 			if (i + 1 < completedTokens.length) i++;
 			continue;
 		}
-		if (t.startsWith("--backend=") || t.startsWith("--cwd=") || t.startsWith("--continue=")) continue;
+		if (t.startsWith("--backend=") || t.startsWith("--cwd=") || t.startsWith("--continue=") || t.startsWith("--model=") || t.startsWith("--thinking=")) continue;
 		if (t === "--keep-context" || t.startsWith("--keep-context=") || t === "--background") continue;
 		if (!t.startsWith("--")) {
 			if (!hasProfile) {
@@ -400,6 +411,18 @@ async function completePlanRunArguments(
 	const isCompletingBackendValue = lastCompleted?.token === "--backend";
 
 	const ctx = contextProvider?.();
+	if (lastCompleted?.token === "--thinking" || fragment.startsWith("--thinking=")) {
+		const eq = fragment.startsWith("--thinking=");
+		const partial = eq ? fragment.slice("--thinking=".length) : fragment;
+		const matches = FORGE_THINKING_LEVELS.filter((level) => level.startsWith(partial));
+		return matches.length ? matches.map((level) => ({ value: `${base}${eq ? "--thinking=" : ""}${level}`, label: level })) : null;
+	}
+	if (lastCompleted?.token === "--model" || fragment.startsWith("--model=")) {
+		const eq = fragment.startsWith("--model=");
+		const partial = eq ? fragment.slice("--model=".length) : fragment;
+		const matches = (ctx?.modelRegistry.getAvailable() ?? []).map((model) => `${model.provider}/${model.id}`).filter((id) => id.startsWith(partial));
+		return matches.length ? matches.map((id) => ({ value: `${base}${eq ? "--model=" : ""}${id}`, label: id })) : null;
+	}
 	const backendIds = ctx ? runtime.descriptors(ctx).map((d) => d.id) : runtime.backendIds();
 
 	if (isCompletingBackendValue) {
@@ -413,6 +436,8 @@ async function completePlanRunArguments(
 	}
 
 	let backendConsumed = false;
+	let modelConsumed = false;
+	let thinkingConsumed = false;
 	let cwdConsumed = false;
 	let continueConsumed = false;
 	let keepContextConsumed = false;
@@ -431,6 +456,13 @@ async function completePlanRunArguments(
 			backendConsumed = true;
 			continue;
 		}
+		if (t === "--model" || t === "--thinking") {
+			if (t === "--model") modelConsumed = true; else thinkingConsumed = true;
+			if (completedTokens[i + 1]) i++;
+			continue;
+		}
+		if (t.startsWith("--model=")) { modelConsumed = true; continue; }
+		if (t.startsWith("--thinking=")) { thinkingConsumed = true; continue; }
 		if (t === "--cwd") {
 			if (completedTokens[i + 1]) {
 				cwdConsumed = true;
@@ -470,6 +502,8 @@ async function completePlanRunArguments(
 	const results: AutocompleteItem[] = [];
 
 	const availableFlags: string[] = [];
+	if (!modelConsumed) availableFlags.push("--model");
+	if (!thinkingConsumed) availableFlags.push("--thinking", ...FORGE_THINKING_LEVELS.map((level) => `--thinking=${level}`));
 	if (!backendConsumed) {
 		availableFlags.push("--backend", "--backend=", ...backendIds.map((b) => `--backend=${b}`));
 	}
@@ -560,6 +594,8 @@ export interface ParsedPlanRunSuccess {
 	profile: string;
 	task: string;
 	backend?: string;
+	model?: { provider: string; id: string };
+	thinkingLevel?: string;
 	cwd?: string;
 	keepContext?: boolean;
 	continueId?: string;
@@ -580,6 +616,8 @@ export function parsePlanRunArgs(command: string, rawOrRest: string | string[]):
 	const delimiterIndex = tokens.findIndex((t) => t.token === "--");
 	let profile: string | undefined;
 	let backend: string | undefined;
+	let model: { provider: string; id: string } | undefined;
+	let thinkingLevel: string | undefined;
 	let cwd: string | undefined;
 	let keepContext = false;
 	let continueId: string | undefined;
@@ -599,6 +637,17 @@ export function parsePlanRunArgs(command: string, rawOrRest: string | string[]):
 			const val = stripQuotes(t.slice("--backend=".length));
 			if (!val) return { ok: false, error: "--backend requires a backend id value." };
 			backend = val;
+		} else if (t === "--model" || t.startsWith("--model=")) {
+			const rawValue = t === "--model" ? optionTokens[++i]?.token : t.slice("--model=".length);
+			if (!rawValue || rawValue.startsWith("--")) return { ok: false, error: "--model requires provider/id." };
+			const parsed = parseForgeSubagentModel(stripQuotes(rawValue));
+			if (!parsed.ok) return { ok: false, error: parsed.error };
+			model = parsed.model;
+		} else if (t === "--thinking" || t.startsWith("--thinking=")) {
+			const rawValue = t === "--thinking" ? optionTokens[++i]?.token : t.slice("--thinking=".length);
+			const value = rawValue ? stripQuotes(rawValue) : undefined;
+			if (!isForgeThinkingLevel(value)) return { ok: false, error: `--thinking requires one of: ${FORGE_THINKING_LEVELS.join(", ")}.` };
+			thinkingLevel = value;
 		} else if (t === "--cwd") {
 			const next = optionTokens[i + 1]?.token;
 			if (!next || next.startsWith("--")) return { ok: false, error: "--cwd requires a path value." };
@@ -670,6 +719,9 @@ export function parsePlanRunArgs(command: string, rawOrRest: string | string[]):
 			if (t === "--backend" || t.startsWith("--backend=")) {
 				return { ok: false, error: "--backend must be specified before task; use '--' to pass flags to task." };
 			}
+			if (t === "--model" || t.startsWith("--model=") || t === "--thinking" || t.startsWith("--thinking=")) {
+				return { ok: false, error: "--model/--thinking must be specified before task; use '--' to pass flags to task." };
+			}
 			if (t === "--cwd" || t.startsWith("--cwd=")) {
 				return { ok: false, error: "--cwd must be specified before task; use '--' to pass flags to task." };
 			}
@@ -697,6 +749,8 @@ export function parsePlanRunArgs(command: string, rawOrRest: string | string[]):
 		profile,
 		task,
 		...(backend ? { backend } : {}),
+		...(model ? { model } : {}),
+		...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
 		...(cwd ? { cwd } : {}),
 		...(keepContext ? { keepContext: true } : {}),
 		...(continueId ? { continueId } : {}),
@@ -721,6 +775,7 @@ async function showStatus(runtime: ForgeSubagentRuntime, ctx: ExtensionCommandCo
 				`Target CWD: ${task.cwd ?? "(parent workspace)"}`,
 				`Collected: ${task.collected ? "yes" : "no"}`,
 			];
+			if (task.continuationId) lines.push(`Retained context: ${task.continuationId}`);
 			if (task.error) lines.push(`Error: ${task.error}`);
 			await showText(ctx, `pi-forge background task: ${task.id}`, lines.join("\n"));
 			return;
@@ -737,7 +792,7 @@ async function showStatus(runtime: ForgeSubagentRuntime, ctx: ExtensionCommandCo
 			...tasks.map((t) => {
 				const cwdStr = t.cwd ? ` cwd: ${t.cwd}` : "";
 				const errStr = t.error ? ` (error: ${t.error})` : "";
-				return `  ${t.id} [${t.status}] profile: ${t.profileId}${cwdStr} collected: ${t.collected ? "yes" : "no"}${errStr}`;
+				return `  ${t.id} [${t.status}] profile: ${t.profileId}${cwdStr} collected: ${t.collected ? "yes" : "no"}${errStr}${t.continuationId ? ` context: ${t.continuationId}` : ""}`;
 			}),
 		];
 		await showText(ctx, "pi-forge background tasks", lines.join("\n"));
@@ -771,6 +826,7 @@ async function showResult(runtime: ForgeSubagentRuntime, ctx: ExtensionCommandCo
 				`Status: ${task.status}`,
 				`Target CWD: ${task.cwd ?? "(parent workspace)"}`,
 			];
+			if (task.continuationId) lines.push(`Retained context: ${task.continuationId}`);
 			if (task.error) lines.push(`Error: ${task.error}`);
 			lines.push("", "Note: Native model usage accounting is reserved for tool-result collection; human inspection does not claim usage.");
 			await showText(ctx, `pi-forge background result: ${taskId}`, lines.join("\n"));
@@ -804,8 +860,8 @@ async function handleRelease(runtime: ForgeSubagentRuntime, ctx: ExtensionComman
 		return;
 	}
 	try {
-		await runtime.releaseContinuation(continueId, ctx);
-		ctx.ui.notify(`pi-forge-subagents: continuation ${continueId} released.`, "info");
+		const released = await backgroundTasksFor(runtime).release(ctx, continueId);
+		ctx.ui.notify(`pi-forge-subagents: continuation ${released.continuationId} released.${released.taskId ? " Result remains available for collection." : ""}`, "info");
 	} catch (error) {
 		ctx.ui.notify(`pi-forge-subagents: release failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 	}
@@ -951,7 +1007,8 @@ async function showHelp(ctx: ExtensionCommandContext): Promise<void> {
 		"  /forge subagent status [id]",
 		"  /forge subagent result <id>",
 		"  /forge subagent cancel <id>",
-		"  /forge subagent release <continueId>",
+		"  /forge subagent release <context-or-task-id>",
+		"  /forge subagent contexts",
 		"",
 		"Subcommands:",
 		"  help      Show this reference manual.",
@@ -963,7 +1020,8 @@ async function showHelp(ctx: ExtensionCommandContext): Promise<void> {
 		"  status    List all background tasks for this session, or check status of a specific task.",
 		"  result    Inspect background task output without claiming usage accounting.",
 		"  cancel    Cancel an active background task by ID.",
-		"  release   Release a retained in-process child continuation session.",
+		"  contexts  List retained context metadata without collecting output or usage.",
+		"  release   Release retained context by context ID or finished background task ID; preserves results/usage.",
 		"",
 		"Options for plan and run:",
 		"  --backend <id>, --backend=<id>      Select an execution backend before the task.",
@@ -971,6 +1029,8 @@ async function showHelp(ctx: ExtensionCommandContext): Promise<void> {
 		"  --keep-context                      Retain in-process child session after successful run for continuation.",
 		"  --continue <id>, --continue=<id>    Continue a previously retained child session (implies keep-context).",
 		"  --background                        Launch task in background after approval (run only).",
+		"  --model <provider/id>                Override model for this approved run (not the saved profile).",
+		"  --thinking <level>                   Override thinking; unsupported levels fail without clamping.",
 		"  --                                  Delimiter marking the start of the task (allows literal flags in task).",
 		"",
 		"Legacy smoke helper note:",

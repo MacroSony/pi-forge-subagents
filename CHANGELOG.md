@@ -2,6 +2,12 @@
 
 ## Unreleased — 0.5.4 candidate
 
+- Reject non-string web-editor enum submissions instead of coercing arrays into valid choices and accidentally deleting a scoped override.
+- Add default-off `allowAgentModelOverrides` at top-level and per profile, permitting unattended per-run `model` and `thinkingLevel` overrides without rewriting profiles. Recheck authorization after preparation and before execution; reject unavailable models/unsupported thinking without fallback or clamping. Retained children keep their effective model/thinking and recheck the grant on every continuation. Surface the setting in scoped web editors and profile discovery.
+- Add CLI `--model` / `--thinking` with validation and completions, while retaining mandatory interactive approval for CLI runs. Approval shows the actual effective thinking level.
+- Replace model-facing task/continuation UUIDs with short adapter-local handles, keep one task ID across preparation/start/result, and translate core IDs privately for continuation and report cleanup. Reload instances receive a fresh short namespace.
+- Add `forge_subagent_task action: contexts` and `/forge subagent contexts` to list retained metadata without output/usage; expose live continuation IDs in task status. Release by context ID or finished background task ID works across branches without claiming or discarding the result/usage. Running tasks are not implicitly cancelled. Result collection keeps its original branch-ownership restriction.
+
 - Require published Forge ^0.5.8 and runtime ^0.1.0-beta.5; pin development Pi SDKs to 1.0.2. TypeBox is a wildcard optional host peer with development pin 1.3.27, avoiding duplicate host-module warnings.
 - Retry generation backend cleanup at most three times and surface the final failure. This is bounded best-effort cleanup, not unconditional resource release.
 - Require continuation and usage coverage in release tests by default. Packed checks use exact published dependency floors, normal peer resolution, isolated HOME/agent directories, and real Forge + parent/child SDK sessions with an offline provider. Cover initial tools, target-relative reads, retained history, foreground/background cleanup-failure and cancellation usage exactly once, pending collection without credit, and JSONL reload on Pi 0.87.0 / 1.0.2.

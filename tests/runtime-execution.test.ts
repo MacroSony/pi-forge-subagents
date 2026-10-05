@@ -155,6 +155,7 @@ test("runtime carries a per-run model override into the sealed plan", async () =
 			backendId: "fake-test-backend",
 			timeoutMs: 60_000,
 			model: { provider: "override-provider", id: "override-model" },
+			unattended: false,
 		});
 		assert.equal(preparation.ok, true, preparation.ok ? undefined : preparation.diagnostics.map((d) => d.message).join("; "));
 		if (preparation.ok) {

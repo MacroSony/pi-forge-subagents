@@ -20,8 +20,9 @@ import {
 export const PROJECT_SUBAGENT_SETTINGS_TAB_ID = "subagent-config-project";
 export const GLOBAL_SUBAGENT_SETTINGS_TAB_ID = "subagent-config-global";
 const SUBAGENT_SETTINGS_ICON = "⚙";
-const FORM_FIELDS = ["backend", "timeoutMs", "allowAgentInvocationWithoutApproval", "summaryInToolDescription", "profiles"] as const;
-const PROFILE_FIELDS = ["enabled", "backend", "timeoutMs"] as const;
+const FORM_FIELDS = ["backend", "timeoutMs", "allowAgentInvocationWithoutApproval", "allowAgentModelOverrides", "summaryInToolDescription", "profiles"] as const;
+const PROFILE_FIELDS = ["enabled", "backend", "timeoutMs", "allowAgentModelOverrides"] as const;
+const MODEL_OVERRIDE_DESCRIPTION = "Permits an agent to supply a single-run model (provider/id) and/or thinkingLevel override; omitted fields keep the profile values. Enabling never switches models automatically, and an unsupported model or thinking level is an error, not a fallback. There is no model allowlist: an override can change cost and send prompt data to a different provider. Inherit removes this scope's override.";
 const BOOLEAN_CHOICES = [
 	{ value: "inherit", label: "Inherit" },
 	{ value: "enabled", label: "Enabled" },
@@ -75,6 +76,13 @@ export function buildSubagentSettingsSchema(
 				description: "Inherit removes this scope's override.",
 			},
 			{
+				key: "allowAgentModelOverrides",
+				label: "Allow agent model/thinking overrides",
+				type: "enum",
+				options: booleanOptions(),
+				description: MODEL_OVERRIDE_DESCRIPTION,
+			},
+			{
 				key: "summaryInToolDescription",
 				label: "Summarize profiles in tool description",
 				type: "enum",
@@ -92,6 +100,14 @@ export function buildSubagentSettingsSchema(
 					{ key: "enabled", label: "Enabled", type: "boolean" },
 					{ key: "backend", label: "Backend override", type: "string", placeholder: "Inherit", maxLength: 128 },
 					{ key: "timeoutMs", label: "Timeout override (ms)", type: "string", placeholder: "Inherit", maxLength: 16 },
+					{
+						key: "allowAgentModelOverrides",
+						label: "Agent model/thinking overrides",
+						type: "enum",
+						options: booleanOptions(),
+						default: "inherit",
+						description: `Per-profile value wins over the scope-level setting. ${MODEL_OVERRIDE_DESCRIPTION}`,
+					},
 				],
 			},
 		],
@@ -107,6 +123,7 @@ export function scopedConfigToContributionValues(rawConfig: Record<string, unkno
 				enabled: profile.enabled === true,
 				backend: typeof profile.backend === "string" ? profile.backend : "",
 				timeoutMs: isValidSubagentTimeoutMs(profile.timeoutMs) ? String(profile.timeoutMs) : "",
+				allowAgentModelOverrides: failClosedBooleanChoice(profile, "allowAgentModelOverrides"),
 			};
 		}
 	}
@@ -114,6 +131,7 @@ export function scopedConfigToContributionValues(rawConfig: Record<string, unkno
 		backend: typeof rawConfig.backend === "string" ? rawConfig.backend : "",
 		timeoutMs: isValidSubagentTimeoutMs(rawConfig.timeoutMs) ? rawConfig.timeoutMs : "",
 		allowAgentInvocationWithoutApproval: booleanChoice(rawConfig.allowAgentInvocationWithoutApproval),
+		allowAgentModelOverrides: failClosedBooleanChoice(rawConfig, "allowAgentModelOverrides"),
 		summaryInToolDescription: booleanChoice(rawConfig.summaryInToolDescription),
 		profiles,
 	};
@@ -190,6 +208,7 @@ export function writeScopedSubagentSettings(
 	if (Object.hasOwn(values, "backend")) applyOptionalString(next, "backend", values.backend);
 	if (Object.hasOwn(values, "timeoutMs")) applyOptionalTimeout(next, "timeoutMs", values.timeoutMs);
 	if (Object.hasOwn(values, "allowAgentInvocationWithoutApproval")) applyBooleanChoice(next, "allowAgentInvocationWithoutApproval", values.allowAgentInvocationWithoutApproval);
+	if (Object.hasOwn(values, "allowAgentModelOverrides")) applyBooleanChoice(next, "allowAgentModelOverrides", values.allowAgentModelOverrides);
 	if (Object.hasOwn(values, "summaryInToolDescription")) applyBooleanChoice(next, "summaryInToolDescription", values.summaryInToolDescription);
 
 	if (Object.hasOwn(values, "profiles")) {
@@ -203,6 +222,8 @@ export function writeScopedSubagentSettings(
 			else delete nextRow.backend;
 			if (row.timeoutMs !== "" && row.timeoutMs !== null && row.timeoutMs !== undefined) nextRow.timeoutMs = Number(row.timeoutMs);
 			else delete nextRow.timeoutMs;
+			// Only touch the override when the row submits it; otherwise keep the stored value.
+			if (Object.hasOwn(row, "allowAgentModelOverrides")) applyBooleanChoice(nextRow, "allowAgentModelOverrides", row.allowAgentModelOverrides);
 			nextProfiles[profileId] = nextRow;
 		}
 		if (Object.keys(nextProfiles).length > 0) next.profiles = nextProfiles;
@@ -228,8 +249,8 @@ function validateScopedValues(
 	if (values.timeoutMs !== undefined && values.timeoutMs !== "" && !isValidSubagentTimeoutMs(values.timeoutMs)) {
 		errors.timeoutMs = `Timeout must be an integer from ${MIN_SUBAGENT_TIMEOUT_MS} to ${MAX_SUBAGENT_TIMEOUT_MS} milliseconds.`;
 	}
-	for (const key of ["allowAgentInvocationWithoutApproval", "summaryInToolDescription"] as const) {
-		if (values[key] !== undefined && !["inherit", "enabled", "disabled"].includes(String(values[key]))) {
+	for (const key of ["allowAgentInvocationWithoutApproval", "allowAgentModelOverrides", "summaryInToolDescription"] as const) {
+		if (values[key] !== undefined && (typeof values[key] !== "string" || !["inherit", "enabled", "disabled"].includes(values[key] as string))) {
 			errors[key] = "Choose Inherit, Enabled, or Disabled.";
 		}
 	}
@@ -264,6 +285,9 @@ function validateScopedValues(
 		if (typeof rawRow.enabled !== "boolean") errors[`profiles.${profileId}.enabled`] = "Enabled must be a boolean.";
 		if (rawRow.backend !== undefined && typeof rawRow.backend !== "string") errors[`profiles.${profileId}.backend`] = "Backend must be a string.";
 		else if (typeof rawRow.backend === "string" && rawRow.backend.length > 128) errors[`profiles.${profileId}.backend`] = "Backend must be at most 128 characters.";
+		if (rawRow.allowAgentModelOverrides !== undefined && (typeof rawRow.allowAgentModelOverrides !== "string" || !["inherit", "enabled", "disabled"].includes(rawRow.allowAgentModelOverrides))) {
+			errors[`profiles.${profileId}.allowAgentModelOverrides`] = "Choose Inherit, Enabled, or Disabled.";
+		}
 		if (rawRow.timeoutMs !== undefined && rawRow.timeoutMs !== "" && !isValidSubagentTimeoutMs(Number(rawRow.timeoutMs))) {
 			errors[`profiles.${profileId}.timeoutMs`] = `Timeout must be an integer from ${MIN_SUBAGENT_TIMEOUT_MS} to ${MAX_SUBAGENT_TIMEOUT_MS} milliseconds.`;
 		}
@@ -329,6 +353,12 @@ function configPathForScope(ctx: ExtensionContext, scope: SettingsScope): string
 
 function booleanChoice(value: unknown): "inherit" | "enabled" | "disabled" {
 	return value === true ? "enabled" : value === false ? "disabled" : "inherit";
+}
+
+/** Mirrors the loader: a present non-boolean value is effectively false, so show Disabled rather than Inherit. */
+function failClosedBooleanChoice(record: Record<string, unknown>, key: string): "inherit" | "enabled" | "disabled" {
+	if (!Object.hasOwn(record, key)) return "inherit";
+	return record[key] === true ? "enabled" : "disabled";
 }
 
 function booleanOptions(): Array<{ value: string; label: string }> {

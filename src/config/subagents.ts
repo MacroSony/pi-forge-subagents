@@ -12,6 +12,8 @@ export interface ForgeSubagentProfileSettings {
 	enabled?: boolean;
 	backend?: string | null;
 	timeoutMs?: number | null;
+	/** undefined inherits the top-level value; non-boolean config is stored as false (fail-closed). */
+	allowAgentModelOverrides?: boolean;
 }
 
 export interface ForgeSubagentSettings {
@@ -20,6 +22,8 @@ export interface ForgeSubagentSettings {
 	timeoutMs: number;
 	timeoutSource: "project" | "global" | "built-in";
 	allowAgentInvocationWithoutApproval?: boolean;
+	/** Top-level default for agent-supplied per-run model (provider/id) and thinkingLevel overrides. */
+	allowAgentModelOverrides?: boolean;
 	summaryInToolDescription?: boolean;
 	summaryInToolDescriptionSource?: "project" | "global";
 	allowedWorkingDirectories?: string[];
@@ -33,6 +37,11 @@ export interface ResolvedSubagentProfilePolicy {
 	enabled: boolean;
 	backend: { id: string; source: "project" | "global" | "built-in" | "explicit" };
 	timeout: { milliseconds: number; source: "project" | "global" | "built-in" | "explicit" };
+	/**
+	 * Permits an agent-supplied single-run model (provider/id) and/or thinkingLevel
+	 * override. It never selects a model by itself; omitted fields use the profile.
+	 */
+	allowAgentModelOverrides: boolean;
 }
 
 export function isValidSubagentTimeoutMs(value: unknown): value is number {
@@ -66,6 +75,7 @@ export function loadForgeSubagentSettings(ctx: ExtensionContext): ForgeSubagentS
 		timeoutMs: DEFAULT_SUBAGENT_TIMEOUT_MS,
 		timeoutSource: "built-in",
 		summaryInToolDescription: false,
+		allowAgentModelOverrides: false,
 		profiles: Object.create(null) as Record<string, ForgeSubagentProfileSettings>,
 		profilesSource: Object.create(null) as Record<string, "project" | "global">,
 		warnings: [],
@@ -117,7 +127,13 @@ export function resolveSubagentProfilePolicy(
 	const timeoutSource: ResolvedSubagentProfilePolicy["timeout"]["source"] = profile.timeoutMs !== undefined && profile.timeoutMs !== null
 		? profileSource
 		: settings.timeoutSource;
-	return { enabled, backend: { id: backendId, source: backendSource }, timeout: { milliseconds: timeoutMs, source: timeoutSource } };
+	const allowAgentModelOverrides = profile.allowAgentModelOverrides ?? settings.allowAgentModelOverrides ?? false;
+	return {
+		enabled,
+		backend: { id: backendId, source: backendSource },
+		timeout: { milliseconds: timeoutMs, source: timeoutSource },
+		allowAgentModelOverrides: allowAgentModelOverrides === true,
+	};
 }
 
 export function profileAuthorizationHint(settings: ForgeSubagentSettings, profileId: string): string | undefined {
@@ -235,6 +251,14 @@ function applySection(raw: Record<string, unknown>, source: "project" | "global"
 			settings.warnings.push(`pi-forge-subagents: ${source} allowAgentInvocationWithoutApproval must be boolean; set to false.`);
 		}
 	}
+	if (Object.hasOwn(raw, "allowAgentModelOverrides")) {
+		if (typeof raw.allowAgentModelOverrides === "boolean") {
+			settings.allowAgentModelOverrides = raw.allowAgentModelOverrides;
+		} else {
+			settings.allowAgentModelOverrides = false;
+			settings.warnings.push(`pi-forge-subagents: ${source} allowAgentModelOverrides must be boolean; set to false.`);
+		}
+	}
 	if (typeof raw.summaryInToolDescription === "boolean") {
 		settings.summaryInToolDescription = raw.summaryInToolDescription;
 		settings.summaryInToolDescriptionSource = source;
@@ -291,6 +315,14 @@ function applySection(raw: Record<string, unknown>, source: "project" | "global"
 			if (typeof record.enabled === "boolean") current.enabled = record.enabled;
 			if (record.backend === null) current.backend = null;
 			else if (typeof record.backend === "string" && record.backend.trim()) current.backend = record.backend.trim();
+			if (Object.hasOwn(record, "allowAgentModelOverrides")) {
+				if (typeof record.allowAgentModelOverrides === "boolean") {
+					current.allowAgentModelOverrides = record.allowAgentModelOverrides;
+				} else {
+					current.allowAgentModelOverrides = false;
+					settings.warnings.push(`pi-forge-subagents: ${source} profile ${profileId} allowAgentModelOverrides must be boolean; set to false.`);
+				}
+			}
 			if (record.timeoutMs === null) current.timeoutMs = null;
 			else if (isValidSubagentTimeoutMs(record.timeoutMs)) current.timeoutMs = record.timeoutMs;
 			settings.profiles[profileId] = current;

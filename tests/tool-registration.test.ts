@@ -128,7 +128,7 @@ test("parseForgeSubagentModel parses provider/id strings and rejects malformed v
 	}
 });
 
-test("renderApprovalSummary shows the effective model from the sealed plan", () => {
+test("renderApprovalSummary shows the effective model and thinking from the sealed plan", () => {
 	const prepared = {
 		plan: {
 			profile: {
@@ -137,6 +137,7 @@ test("renderApprovalSummary shows the effective model from the sealed plan", () 
 				profile: { model: { provider: "default-provider", id: "default-model" }, thinkingLevel: "high" },
 			},
 			model: { provider: "override-provider", id: "override-model" },
+			thinkingLevel: "low",
 			backendId: "pi-subprocess-readonly",
 			systemPrompt: "system",
 			messages: [],
@@ -154,6 +155,8 @@ test("renderApprovalSummary shows the effective model from the sealed plan", () 
 	const summary = renderApprovalSummary(prepared, "Inspect this code carefully.");
 	assert.match(summary, /override-provider\/override-model/);
 	assert.doesNotMatch(summary, /default-provider/);
+	assert.match(summary, /Thinking: low/);
+	assert.doesNotMatch(summary, /Thinking: high/);
 	assert.match(summary, /Access: workspace-write \(isolated\)/);
 	assert.match(summary, /Workspace mounts: project:read-write/);
 	assert.match(summary, /Process: allowed/);
@@ -334,4 +337,29 @@ test("forge_subagent rejects an unknown backend before approval", async () => {
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
+});
+
+
+test("unattended model/thinking opt-in forwards per-run fields without relaxing backend pinning", async () => {
+ const {mkdtempSync,mkdirSync,writeFileSync,rmSync}=await import("node:fs");
+ const cwd=mkdtempSync(join(tmpdir(),"forge-tool-overrides-"));
+ const path=join(cwd,".pi/forge/subagents.json");mkdirSync(join(cwd,".pi/forge"),{recursive:true});
+ const runs: any[]=[];let tool:any;
+ const runtime:ForgeSubagentRuntime={backendIds:()=>["pi-inprocess","pi-rpc-readonly"],descriptors:()=>[],prepare:async (_p,_t,_ctx,o)=>{runs.push(o);return {ok:false,diagnostics:[]}},discard:async()=>{},execute:async()=>{throw new Error("not reached")},dispose:async()=>{}};
+ registerForgeSubagentTool({registerTool:(t:any)=>tool=t} as any,runtime,{sessionProvider:()=>({}) as any});
+ const ctx={cwd,hasUI:false,isProjectTrusted:()=>true} as any;
+ const config=(allow:unknown,profileAllow?:unknown)=>writeFileSync(path,JSON.stringify({allowAgentInvocationWithoutApproval:true,allowAgentModelOverrides:allow,profiles:{"project:worker":{enabled:true,backend:"pi-inprocess",...(profileAllow===undefined?{}:{allowAgentModelOverrides:profileAllow})}}}));
+ const invoke=(params:any)=>tool.execute("call",{profileId:"worker",task:"task",...params},undefined,undefined,ctx);
+ try{
+  config(false);assert.match(JSON.stringify((await invoke({thinkingLevel:"low"})).content),/allowAgentModelOverrides/);assert.equal(runs.length,0);
+  config(true);await invoke({model:"p/m",thinkingLevel:"low"});assert.deepEqual(runs.at(-1).model,{provider:"p",id:"m"});assert.equal(runs.at(-1).thinkingLevel,"low");assert.equal(runs.at(-1).unattended,true);
+  await invoke({thinkingLevel:"off"});assert.equal(runs.at(-1).model,undefined);assert.equal(runs.at(-1).thinkingLevel,"off");
+  await invoke({});assert.equal(runs.at(-1).model,undefined);assert.equal(runs.at(-1).thinkingLevel,undefined);
+  const count=runs.length;
+  assert.match(JSON.stringify((await invoke({backend:"pi-rpc-readonly",model:"p/m"})).content),/pinned to the configured backend/);
+  await invoke({thinkingLevel:"nonsense"});await invoke({model:"malformed"});assert.equal(runs.length,count);
+  config(true,false);await invoke({model:"p/m"});assert.equal(runs.length,count);
+  config(false,true);await invoke({model:"p/m"});assert.equal(runs.length,count+1);
+  config(true,null);await invoke({model:"p/m"});assert.equal(runs.length,count+1);
+ }finally{rmSync(cwd,{recursive:true,force:true});}
 });
