@@ -22,6 +22,8 @@ export interface ForgeSubagentSettings {
 	timeoutMs: number;
 	timeoutSource: "project" | "global" | "built-in";
 	allowAgentInvocationWithoutApproval?: boolean;
+	/** Human opt-in master switch for background completion wakes; defaults false, malformed values fail closed. */
+	notifyOnComplete?: boolean;
 	/** Top-level default for agent-supplied per-run model (provider/id) and thinkingLevel overrides. */
 	allowAgentModelOverrides?: boolean;
 	summaryInToolDescription?: boolean;
@@ -76,6 +78,7 @@ export function loadForgeSubagentSettings(ctx: ExtensionContext): ForgeSubagentS
 		timeoutSource: "built-in",
 		summaryInToolDescription: false,
 		allowAgentModelOverrides: false,
+		notifyOnComplete: false,
 		profiles: Object.create(null) as Record<string, ForgeSubagentProfileSettings>,
 		profilesSource: Object.create(null) as Record<string, "project" | "global">,
 		warnings: [],
@@ -249,6 +252,12 @@ function applySection(raw: Record<string, unknown>, source: "project" | "global"
 		} else {
 			settings.allowAgentInvocationWithoutApproval = false;
 			settings.warnings.push(`pi-forge-subagents: ${source} allowAgentInvocationWithoutApproval must be boolean; set to false.`);
+		}
+	}
+	if (Object.hasOwn(raw, "notifyOnComplete")) {
+		settings.notifyOnComplete = raw.notifyOnComplete === true;
+		if (typeof raw.notifyOnComplete !== "boolean") {
+			settings.warnings.push(`pi-forge-subagents: ${source} notifyOnComplete must be boolean; set to false.`);
 		}
 	}
 	if (Object.hasOwn(raw, "allowAgentModelOverrides")) {

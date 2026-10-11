@@ -10,10 +10,9 @@ preparation artifacts out. It never imports main-package internals.
 
 ## Compatibility and release validation
 
-This 0.5.4 candidate requires **Forge ^0.5.8** and
-**pi-subagent-runtime ^0.1.0-beta.5**. The Forge host is already published;
-release the runtime before installing/publishing this optional package from
-npm. Candidate versions here do not imply registry availability.
+Requires **Forge ^0.5.8** and **pi-subagent-runtime ^0.1.0-beta.5**.
+Both dependency floors are published. Features under the changelog's
+Unreleased heading are source changes, not a claim that npm has been updated.
 
 Pi SDK packages and TypeBox are optional wildcard host peers, not bundled
 runtime dependencies. Development pins are Pi **1.0.2** and TypeBox **1.3.27**.
@@ -52,7 +51,13 @@ sessions plus the real Forge compiler, and an offline synthetic provider.
 It checks `initial: [read]` / `[]`, target-relative reads, complete retained
 history, cleanup-failure usage in foreground/background, cancellation after a
 billed turn, pending inspection without credit, one-time collection,
-and JSONL reload. It does not certify live-provider billing or remote CI.
+and JSONL reload. An additional real-session fixture checks idle completion
+wakes, busy steering/tool ordering, human/per-run opt-outs, read-only pending
+usage, complete task IDs, two-model grouping and native/Forge receipt totals.
+Hosts with codemode also exercise actual child executions through its wrapper;
+older hosts verify direct receipt degradation. The compatibility CI matrix
+runs packed consumers on Pi 0.87.0 and 1.0.4. These offline fixtures do not
+certify live-provider billing or that remote CI has run.
 
 ### Nested usage
 
@@ -66,6 +71,15 @@ runtime without request coverage is retained but receives no invented nested
 request count. A top-level native Pi `usage` is emitted only for complete,
 consistent token/cost coverage; partial or invalid values are never padded with
 zeros.
+
+On hosts with nested tool events (Pi 0.99+), the optional extension carries
+subagent accounting metadata through `parentToolCallId` onto the enclosing
+tool result. Thus codemode/recursive wrappers retain `forgeNestedUsage` for
+Forge's existing cache panel, while Pi still owns native usage exactly once.
+`details.forgeSubagentUsage` contains only versioned accounting metadata, not
+the child's prompt or output. Older hosts without nested events keep direct
+receipt support. Malformed/conflicting metadata is reported as incomplete,
+not silently guessed or repaired by rewriting history.
 
 This mapping requires the dependency floors above. Runtime beta.4 receipts
 are handled defensively without invented attribution, but beta.4 is not a
@@ -224,6 +238,12 @@ the human subagent command interface.
 /forge subagent backends
 /forge subagent config
 
+# Read-only per-model consumption; no task ID needed
+/forge-agent usage                 # recorded subagent usage across this session
+/forge-agent usage --branch        # only the current branch
+/forge-agent usage <task-id>        # optional detail shortcut
+/forge subagent usage [task-id] [--branch]
+
 # Dry planning (validates full delegated request without provider transport)
 /forge subagent plan <profile> [--backend <id>] [--model <provider/id>] [--thinking <level>] [--cwd <path>] [--keep-context] [--continue <id>] [--] <task>
 
@@ -251,7 +271,11 @@ the human subagent command interface.
 - `--`: Delimiter marking the beginning of the task text. Preserves literal flags, whitespace, and quotes without shell interpretation.
 
 Model tools expose the same options as `model`, `thinkingLevel`, `cwd`, `keepContext`, `continueId`, and
-`background` on `forge_subagent`. Use `forge_subagent_task` with `action`
+`background` on `forge_subagent`. Background model calls also accept
+`notifyOnComplete: false` to opt one run out of completion notifications
+(they are only sent when the human enabled the opt-in); `true` cannot override
+the human master switch. Foreground calls never notify.
+Use `forge_subagent_task` with `action`
 `status` / `result` / `cancel` and a task `id`, `contexts` for retained-context metadata,
 or `release` and a context or finished background-task `id`. These are new tool schemas: install the matching runtime + optional
 artifacts and restart/reload the test host before trying them. Published beta.4
@@ -285,10 +309,92 @@ remain billable even when cleanup fails.
 ### Background tasks and usage accounting
 
 - **Approval before launch**: Background tasks use the same approval policy as foreground runs. CLI execution always asks; model tools may use explicitly trusted unattended configuration.
-- **No injected followups**: Launching a background task does not inject automatic assistant messages into the ongoing chat.
+- **Completion notification**: Opt-in (off by default). When the human enables `notifyOnComplete`, eligible background tasks send one notification. A short custom message names completed/failed task IDs and asks the parent to collect results. It is not an assistant result or a user instruction, and does not contain task output or usage.
 - **Non-claiming inspection**: `/forge subagent result <id>` reads results with `claimUsage=false`. Human inspection never steals token or cost accounting from subsequent model-directed tool collection.
 - **Result ownership**: Model-tool collection uses `forge_subagent_task` (`action: "result"`, `id: <runId>`), is allowed only on the launch branch or its descendant, and credits usage once per task. Repeated reads return output without another receipt.
-- **No CLI ledger**: Native Pi model usage is credited solely through model tool-result collection; the CLI does not maintain a duplicate usage accounting ledger.
+- **No duplicate ledger**: Native Pi model usage is credited solely through model tool-result collection; usage commands read persisted receipts instead of writing another native usage entry.
+
+### Quick per-model usage
+
+`/forge-agent usage` (also `/forge subagent usage`) needs **no task ID**. It
+shows recorded subagent usage across the current session file's branches by
+provider/model: request count, input/output, cache reads/writes and estimated
+cost. Use `--branch` for the current branch only. In the TUI, select a task and
+press Enter for detail; an explicit task ID remains an optional shortcut.
+Only subagent receipts are included; other tools, main-model requests and
+summaries are not charged to a child. Use Pi's `/session` for its native totals.
+
+Model labels identify the selected execution model recorded by the runtime,
+**not a claim about an automatic provider's physical route**. Coverage gaps
+remain `unknown` or explicitly labelled known subtotals. Requests are never
+inferred from tool-call counts, and estimates are not provider bills.
+
+Running and completed-but-uncollected tasks appear separately from recorded
+totals. Reading the command, its completions, or CLI `result` does not collect
+usage or start a model. Background snapshots obey the launch-branch gate:
+whole-session recorded totals do not unlock another branch's uncollected
+output or usage. No other session files are scanned. Recorded receipts remain
+readable after reopening the session; live task and
+continuation handles still expire on reload/restart. Historical direct
+receipts can be classified when evidence exists; old wrapped receipts lacking
+model details are not retroactively assigned to a guessed model.
+
+### Task cards and read-only views
+
+Subagent cards show the selected model and thinking level as soon as the exact
+plan is prepared, including while a foreground child is still running and when
+a background child is launched. They use a saved execution snapshot, not a
+later lookup of mutable profile defaults. Before selection, explicit choices
+are only requested values; old records without metadata remain unknown.
+
+The compact card prioritizes task, status, model/thinking and available usage.
+Long model-facing launch instructions and approval audit text are retained for
+the model and expanded details rather than filling the collapsed card. Brief
+risk indicators remain visible. A background launch is labelled as a *started*
+event, not a forever-running status after session reload. Duration comes from
+the child's report, not launcher latency; no speculative live cost counter.
+
+`/forge-agent status` without an ID opens a task selector. Up/Down chooses a
+task, Enter opens read-only details, and Esc returns/closes. Usage has the same
+navigation; PgUp/PgDn scroll longer reports. Reading never collects usage,
+starts a model, cancels a task or releases a context. IDs remain in details
+and completion for users who want them, not something to memorize.
+
+The new views use a read-only custom component and share a dialog gate with
+subagent approvals: a view reports busy instead of replacing an outstanding
+approval. Headless commands retain plain text. Task titles are bounded and
+shown only where the existing launch-branch visibility allows; same-parent
+status metadata does not waive result access checks.
+
+### Completion notification policy
+
+The human master switch is `notifyOnComplete` in global or trusted-project
+`subagents.json` (and the scoped Web settings pages). Default: **false**
+(opt-in), so upgrading keeps the previous polling-only behavior. Existing
+configuration precedence applies; an explicit invalid boolean is false with a
+warning. To enable completion notifications:
+
+```json
+{ "notifyOnComplete": true }
+```
+
+For one background model call, use `notifyOnComplete: false`. The effective
+human switch must be on both at launch and delivery; an agent's `true` cannot
+turn it on, and enabling it later does not revive opted-out tasks. This setting
+does not authorize delegation, another model, or external actions.
+
+- Busy parent: queue a custom steering message at Pi's tool-batch boundary.
+- Idle parent: trigger one parent turn per coalesced completion batch. **This
+  can issue a model request**; disable notifications if that is unwanted.
+- Recheck the current parent session, launch branch/descendant, trust and
+  applicable delegation grants before submission. Invalid context/revoked
+  permission is suppressed, not replayed when the user returns.
+- Coalesce same-tick completions; no token-by-token/progress steering spam.
+  Notification does not collect the task or claim its usage.
+- Cancel, collection, shutdown and disposal remove pending notifications.
+  Pi's public `sendMessage` has no per-message acknowledgement or retraction:
+  once submitted, queue processing belongs to Pi. The extension does not clear
+  the user's unrelated steering queue or retry a failed submission.
 
 ### Cancellation semantics
 

@@ -1,6 +1,6 @@
 {
   "name": "@zihanw/pi-forge-subagents",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "Optional pi-forge subagent integration: discovers the active pi-forge host through the versioned /subagent host port and owns subagent execution/config.",
   "type": "module",
   "exports": {

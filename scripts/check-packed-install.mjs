@@ -306,6 +306,12 @@ try {
 			env: { ...isolatedEnv, FORGE_CHAIN_CWD: join(fixture, "real-chain") },
 			timeout: 120_000,
 		}).trim());
+		writeFileSync(join(consumer, "usage-notify.mjs"), readFileSync(join(rootDir, "scripts", "fixtures", "packed-usage-notify.mjs")));
+		console.log(run(process.execPath, ["usage-notify.mjs"], {
+			cwd: consumer,
+			env: { ...isolatedEnv, FORGE_USAGE_CWD: join(fixture, "usage-notify") },
+			timeout: 120_000,
+		}).trim());
 	} finally {
 		rmSync(consumer, { recursive: true, force: true });
 		rmSync(fixture, { recursive: true, force: true });

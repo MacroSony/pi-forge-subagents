@@ -132,6 +132,7 @@ test("scoped values retain absence as inherit instead of materializing effective
 		timeoutMs: "",
 		allowAgentInvocationWithoutApproval: "disabled",
 		allowAgentModelOverrides: "inherit",
+		notifyOnComplete: "inherit",
 		summaryInToolDescription: "inherit",
 		profiles: {
 			"global:reviewer": { enabled: true, backend: "", timeoutMs: "30000", allowAgentModelOverrides: "inherit" },

@@ -1,6 +1,6 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
-import { getMarkdownTheme, type ExtensionAPI, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { AgentResponse, SubagentDiagnostic } from "../contract/index.ts";
 import type { ForgeSubagentPreparedRun, ForgeSubagentRuntime, SubagentBackendExecutionUpdate } from "../runtime/subagent-runtime.ts";
@@ -9,14 +9,15 @@ import type { ForgeNestedUsage } from "@zihanw/pi-forge/subagent";
 import { canonicalDelegationProfileId, loadForgeSubagentSettings, profileAuthorizationHint, resolveSubagentProfilePolicy } from "../config/subagents.ts";
 import type { ForgeHostSession } from "../host/session.ts";
 import { backgroundTasksFor } from "../runtime/background-tasks.ts";
+import { withSubagentDialog } from "../ui/dialog-gate.ts";
+import { snapshotSubagentExecution, type SubagentExecutionDisplay } from "../ui/execution-display.ts";
+import { renderSubagentCard } from "../ui/subagent-card.ts";
+import { plainSubagentText } from "../ui/plain-text.ts";
 
 const APPROVE = "Approve and run";
 const VIEW_FULL_PROMPT = "View full prompt";
 const REJECT = "Reject";
 const MAX_PROGRESS_ITEMS = 100;
-const MAX_RENDER_TASK_CHARS = 100;
-const MAX_RENDER_OUTPUT_LINES = 8;
-const MAX_RENDER_OUTPUT_CHARS = 2_000;
 const MAX_RENDER_PROGRESS_LINES = 8;
 
 const ForgeSubagentParameters = Type.Object({
@@ -24,6 +25,7 @@ const ForgeSubagentParameters = Type.Object({
 	keepContext: Type.Optional(Type.Boolean({ description: "Retain the complete in-process child context until explicit release or parent session shutdown." })),
 	continueId: Type.Optional(Type.String({ minLength: 1, description: "Continue an in-process child from this parent session. Profile, model, tools and cwd must remain unchanged." })),
 	background: Type.Optional(Type.Boolean({ description: "Return after approved launch; use forge_subagent_task status/result/cancel. Parent session shutdown cancels the task." })),
+	notifyOnComplete: Type.Optional(Type.Boolean({ description: "Background only, effective only when the human notifyOnComplete opt-in is enabled (off by default): request one completion notification (default true once enabled). The human master switch always wins; false opts this run out. Foreground runs never notify." })),
 	profileId: Type.String({ minLength: 1, description: "ID of a Pi Forge agent profile enabled for subagent delegation." }),
 	task: Type.String({ minLength: 1, description: "The focused task to delegate to the subagent." }),
 	backend: Type.Optional(Type.String({ minLength: 1, description: "Backend ID to execute through (interactive runs only)." })),
@@ -65,6 +67,9 @@ export interface ForgeSubagentToolDetails {
 	diagnostics: SubagentDiagnostic[];
 	progress: SubagentBackendExecutionUpdate[];
 	response?: AgentResponse;
+	execution?: SubagentExecutionDisplay;
+	/** Explicit call choices are requested until preparation resolves selection. */
+	requested?: { model?: string; thinkingLevel?: string };
 	runId?: string;
 	background?: boolean;
 	cwd?: string;
@@ -119,7 +124,7 @@ export function renderApprovalSummary(prepared: ForgeSubagentPreparedRun, task: 
 		`Execution fingerprint: ${plan.executionFingerprint}`,
 		`Conversation fingerprint: ${plan.conversationFingerprint}`,
 	];
-	return lines.join("\n");
+	return lines.map(plainSubagentText).join("\n");
 }
 
 function renderFullPrompt(prepared: ForgeSubagentPreparedRun, task: string): string {
@@ -131,20 +136,7 @@ function renderFullPrompt(prepared: ForgeSubagentPreparedRun, task: string): str
 		"",
 		"--- MESSAGES ---",
 		...prepared.plan.messages.map((message, index) => `[${index}] ${message.role}: ${typeof message.content === "string" ? message.content : JSON.stringify(message.content)}`),
-	].join("\n");
-}
-
-// Pi's select/editor UI is a single slot: a second concurrent dialog clears
-// the first component and leaves its promise permanently unresolved. Parallel
-// tool calls must therefore serialize the interactive approval flow through
-// this gate. Execution after each approval is not gated, so approved runs
-// still overlap; unattended invocation never enters the gate.
-let approvalDialogGate: Promise<void> = Promise.resolve();
-
-function withApprovalDialog<T>(run: () => Promise<T>): Promise<T> {
-	const next = approvalDialogGate.then(run);
-	approvalDialogGate = next.then(() => undefined, () => undefined);
-	return next;
+	].map(plainSubagentText).join("\n");
 }
 
 export function requestForgeSubagentApproval(
@@ -153,7 +145,7 @@ export function requestForgeSubagentApproval(
 	ctx: ExtensionContext,
 	signal?: AbortSignal,
 ): Promise<ForgeSubagentApprovalResult> {
-	return withApprovalDialog(async () => {
+	return withSubagentDialog(ctx.ui, async () => {
 		let viewedFullPrompt = false;
 		while (!signal?.aborted) {
 			const choice = await ctx.ui.select(renderApprovalSummary(prepared, task), [APPROVE, VIEW_FULL_PROMPT, REJECT], { signal });
@@ -194,6 +186,10 @@ export function registerForgeSubagentTool(
 					approval: { required: approvalRequired, approved: false, viewedFullPrompt: false, source: approvalRequired ? "none" : "trusted-project-config" },
 					diagnostics: configDiagnostics,
 					progress: [],
+					...((params.model !== undefined || params.thinkingLevel !== undefined) ? { requested: {
+						...(params.model !== undefined ? { model: params.model } : {}),
+						...(params.thinkingLevel !== undefined ? { thinkingLevel: params.thinkingLevel } : {}),
+					} } : {}),
 				};
 
 				let modelOverride: ForgeSubagentModelOverride | undefined;
@@ -260,6 +256,7 @@ export function registerForgeSubagentTool(
 
 				onUpdate?.({ content: toolContent("Preparing the exact subagent prompt; provider transport is still closed."), details: baseDetails });
 				let prepared: ForgeSubagentPreparedRun | undefined;
+				let latestDetails = baseDetails;
 				try {
 					const preparation = await runtime.prepare(canonicalProfileId, params.task, ctx, {
 						backendId: policy.backend.id,
@@ -282,8 +279,10 @@ export function registerForgeSubagentTool(
 					const preparedDetails: ForgeSubagentToolDetails = {
 						...baseDetails,
 						status: approvalRequired ? "awaiting-approval" : "prepared",
+						execution: snapshotSubagentExecution(prepared, params.background ? "background" : "foreground"),
 						diagnostics: [...configDiagnostics, ...prepared.diagnostics],
 					};
+					latestDetails = preparedDetails;
 					onUpdate?.({
 						content: toolContent(approvalRequired ? "The exact plan is ready and awaiting human approval." : "The exact plan is ready; approval bypassed by trusted-project configuration."),
 						details: preparedDetails,
@@ -317,15 +316,21 @@ export function registerForgeSubagentTool(
 						},
 						progress,
 					};
+					latestDetails = running;
 					if (signal?.aborted) throw new DOMException("Invocation cancelled before launch.", "AbortError");
 					if (params.background) {
-						const launched = await backgroundTasksFor(runtime).launch(prepared, ctx);
+						const launched = await backgroundTasksFor(runtime).launch(prepared, ctx, {
+							notifyOnComplete: params.notifyOnComplete,
+							unattended: !approvalRequired,
+							requiresModelOverridePermission: Boolean(modelOverride || params.thinkingLevel !== undefined),
+						});
 						prepared = undefined;
 						return {
 							content: toolContent(`Background subagent launched: ${launched.id}. Use forge_subagent_task with action status/result/cancel and this id. No result or usage is credited until result collection.`),
 							details: { ...running, status: "running", runId: launched.id, background: true, cwd: launched.cwd },
 						};
 					}
+					onUpdate?.({ content: toolContent("Subagent running."), details: running });
 					const response = await runtime.execute(prepared, ctx, signal, (update) => {
 						progress.push(structuredClone(update));
 						if (progress.length > MAX_PROGRESS_ITEMS) progress.splice(0, progress.length - MAX_PROGRESS_ITEMS);
@@ -367,27 +372,44 @@ export function registerForgeSubagentTool(
 				} catch (error) {
 					if (prepared) await runtime.discard(prepared).catch(() => undefined);
 					if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
-						return { content: toolContent("Subagent invocation was cancelled."), details: { ...baseDetails, status: "cancelled" } };
+						return { content: toolContent("Subagent invocation was cancelled."), details: { ...latestDetails, status: "cancelled" } };
 					}
 					const message = error instanceof Error ? error.message : String(error);
-					return { content: toolContent(`Subagent invocation failed: ${message}`), details: { ...baseDetails, status: "failed" } };
+					return { content: toolContent(`Subagent invocation failed: ${message}`), details: { ...latestDetails, status: "failed" } };
 				}
 			},
 
-			renderCall(args, theme) {
-				const task = truncate(args.task.replace(/\s+/g, " ").trim(), MAX_RENDER_TASK_CHARS);
-				return new Text(
-					`${theme.fg("toolTitle", theme.bold("forge subagent "))}${theme.fg("accent", args.profileId)}\n${theme.fg("dim", task)}`,
-					0,
-					0,
-				);
+			renderCall(_args, theme) {
+				// Pi retains the call block after completion: dynamic task/selection belongs in the result only.
+				return new Text(theme.fg("toolTitle", theme.bold("forge subagent")), 0, 0);
 			},
 
 			renderResult(result, { expanded, isPartial }, theme) {
 				const details = result.details;
-				if (!details) return new Text(textContent(result) || "(no subagent result)", 0, 0);
-				if (!expanded) return renderCollapsedResult(result, details, isPartial, theme);
-				return renderExpandedResult(result, details, theme);
+				if (!details) return new Text(plainSubagentText(textContent(result) || "(no subagent result)"), 0, 0);
+				const output = textContent(result) || details.response?.output?.text;
+				const expandedProgress = details.progress.filter((update) => plainSubagentText(update.message).trim() !== plainSubagentText(output ?? "").trim());
+				return renderSubagentCard({
+					profileId: details.profileId, title: expanded ? undefined : details.task, status: details.status,
+					execution: details.execution, response: details.response,
+					launchEvent: details.background === true && details.status === "running" && !details.response,
+					live: isPartial, output,
+					progress: details.progress.at(-1)?.message,
+					requested: details.requested,
+					warnings: [
+						...details.diagnostics.filter((d) => d.level !== "info"),
+						...(details.response?.effectiveToolIds?.length === 0 ? [{ level: "warning" as const, code: "tools.none", message: "The subagent ran with NO tools. The intersection of the prompt-stack tool policy, the backend tool catalog, and the access preset was empty." }] : []),
+					],
+					details: [
+						`Approval: ${approvalText(details.approval)}`,
+						...(details.approval.executionFingerprint ? [`Execution fingerprint: ${details.approval.executionFingerprint}`] : []),
+						...(details.approval.approvedAt ? [`Approved at: ${details.approval.approvedAt}`] : []),
+						...(details.execution ? [`Run: ${details.execution.runId}`, `Mode: ${details.execution.mode}`, `Context: ${details.execution.contextMode}`, `Backend: ${details.execution.backendId}`, `Cwd: ${details.execution.cwd ?? "(parent workspace)"}`] : []),
+						`─── Delegated task ───\n${details.task}`,
+						...(expandedProgress.length ? ["─── Live progress ───", ...expandedProgress.slice(-MAX_RENDER_PROGRESS_LINES).map((u) => `${u.phase}: ${u.message}`)] : []),
+						...(details.diagnostics.some((d) => d.level === "info") ? [`─── Diagnostics ───\n${renderDiagnostics(details.diagnostics.filter((d) => d.level === "info"))}`] : []),
+					],
+				}, expanded, theme);
 			},
 		});
 	}
@@ -427,93 +449,14 @@ function forgeSubagentToolDescription(embedded?: string): string {
 		"The optional backend parameter selects the execution backend for interactively approved runs; unattended invocation always uses the configured default backend.",
 		"model (provider/id) and thinkingLevel select per-run settings. Unattended overrides require the trusted allowAgentModelOverrides opt-in; otherwise they are rejected. Omitted fields keep the profile defaults (or a retained child's settings). Unsupported choices fail; no automatic fallback or clamping.",
 		"Use keepContext for same-parent in-process continuation, then continueId with the same profile. Use background to launch without waiting and forge_subagent_task to inspect/collect/cancel; list retained contexts with action contexts and release by context ID or a finished background task ID. Keep the same model/thinking when continuing. Task/context handles are short and session-local; no handles survive parent session shutdown.",
+		"Background completion notifications are off unless the human enables the notifyOnComplete opt-in; when enabled, a background run sends one short custom notification unless notifyOnComplete:false opts it out. Notifications do not collect results or usage; foreground calls never send a duplicate completion notification.",
 		"Use the final report as evidence and do not repeatedly request the same rejected delegation.",
 	].join(" ");
 	return embedded ? `${lines}\n\n${embedded}` : lines;
-}
-
-function renderCollapsedResult(
-	result: AgentToolResult<ForgeSubagentToolDetails>,
-	details: ForgeSubagentToolDetails,
-	isPartial: boolean,
-	theme: Theme,
-) {
-	const icon = details.status === "completed"
-		? theme.fg("success", "✓")
-		: details.status === "failed"
-			? theme.fg("error", "✗")
-			: details.status === "cancelled" || details.status === "timed-out"
-				? theme.fg("warning", "○")
-				: theme.fg("accent", "●");
-	const lines = [`${icon} ${theme.fg("toolTitle", theme.bold(details.profileId))} ${theme.fg("muted", `[${details.status}${isPartial ? ", live" : ""}]`)}`];
-	if (details.response?.model) {
-		lines.push(theme.fg("dim", `${details.response.model.provider}/${details.response.model.id} · ${details.response.durationMs}ms`));
-	} else if (details.progress.length > 0) {
-		const last = details.progress.at(-1);
-		if (last) lines.push(theme.fg("dim", last.message));
-	}
-	const output = textContent(result);
-	if (output) lines.push(theme.fg(details.status === "failed" ? "error" : "toolOutput", truncateLines(output, MAX_RENDER_OUTPUT_LINES, MAX_RENDER_OUTPUT_CHARS)));
-	if (details.response?.usage) lines.push(theme.fg("dim", usageText(details.response.usage)));
-	lines.push(theme.fg("muted", `Approval: ${approvalText(details.approval)}`));
-	return new Text(lines.join("\n"), 0, 0);
-}
-
-function renderExpandedResult(
-	result: AgentToolResult<ForgeSubagentToolDetails>,
-	details: ForgeSubagentToolDetails,
-	theme: Theme,
-) {
-	const container = new Container();
-	container.addChild(new Text(theme.fg("toolTitle", theme.bold(`${details.profileId} [${details.status}]`)), 0, 0));
-	container.addChild(new Text(theme.fg("muted", `Approval: ${approvalText(details.approval)}`), 0, 0));
-	if (details.response?.model) {
-		container.addChild(new Text(`${theme.fg("muted", "Model:")} ${details.response.model.provider}/${details.response.model.id} (${details.response.durationMs}ms)`, 0, 0));
-	}
-	container.addChild(new Spacer(1));
-	container.addChild(new Text(theme.fg("muted", "─── Delegated task ───"), 0, 0));
-	container.addChild(new Text(details.task, 0, 0));
-
-	if (details.progress.length > 0) {
-		container.addChild(new Spacer(1));
-		container.addChild(new Text(theme.fg("muted", "─── Live progress ───"), 0, 0));
-		for (const update of details.progress.slice(-MAX_RENDER_PROGRESS_LINES)) {
-			container.addChild(new Text(`${theme.fg("accent", update.phase)}: ${update.message}`, 0, 0));
-		}
-	}
-
-	const output = textContent(result) || details.response?.output?.text;
-	if (output) {
-		container.addChild(new Spacer(1));
-		container.addChild(new Text(theme.fg("muted", "─── Result ───"), 0, 0));
-		container.addChild(new Markdown(output, 0, 0, getMarkdownTheme()));
-	}
-	if (details.response?.usage) {
-		container.addChild(new Spacer(1));
-		container.addChild(new Text(theme.fg("dim", usageText(details.response.usage)), 0, 0));
-	}
-	return container;
-}
-
-function usageText(usage: NonNullable<AgentResponse["usage"]>): string {
-	const parts: string[] = [];
-	if (usage.tokens) {
-		parts.push(`${usage.tokens.input} input`, `${usage.tokens.output} output`, `${usage.tokens.total} total`);
-	}
-	if (usage.cost) parts.push(`$${usage.cost.amount.toFixed(4)} ${usage.cost.currency}`);
-	return parts.length > 0 ? parts.join(" · ") : "No usage reported";
 }
 
 function approvalText(approval: ForgeSubagentApprovalReceipt): string {
 	if (!approval.approved) return approval.required ? "not approved" : "not executed";
 	if (approval.source === "trusted-project-config") return "per-run approval bypassed by trusted-project config";
 	return `approved${approval.viewedFullPrompt ? " after full-prompt review" : ""}`;
-}
-
-function truncate(text: string, maxChars: number): string {
-	return text.length <= maxChars ? text : `${text.slice(0, Math.max(0, maxChars - 3))}...`;
-}
-
-function truncateLines(text: string, maxLines: number, maxChars: number): string {
-	return truncate(text.split("\n").slice(0, maxLines).join("\n"), maxChars);
 }

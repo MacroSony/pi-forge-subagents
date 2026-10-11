@@ -1,11 +1,15 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Container, Text } from "@earendil-works/pi-tui";
+import type { AgentResponse } from "../contract/index.ts";
+import { renderSubagentCard } from "../ui/subagent-card.ts";
+import { plainSubagentText } from "../ui/plain-text.ts";
 import { Type } from "typebox";
 import type { ForgeHostSession } from "../host/session.ts";
-import { backgroundTasksFor } from "../runtime/background-tasks.ts";
+import { backgroundTasksFor, type BackgroundTaskStatus, type ForgeContinuationSummary } from "../runtime/background-tasks.ts";
 import type { ForgeSubagentRuntime } from "../runtime/subagent-runtime.ts";
 import { mapForgeSubagentResponseUsage } from "./forge-subagent-usage.ts";
 
-/** Management never starts inference or injects follow-up chat messages. */
+/** Management itself never starts inference or claims usage during read-only inspection. */
 export function registerForgeSubagentTaskTool(
 	pi: ExtensionAPI,
 	runtime: ForgeSubagentRuntime,
@@ -14,7 +18,7 @@ export function registerForgeSubagentTaskTool(
 	pi.registerTool({
 		name: "forge_subagent_task",
 		label: "Forge Subagent Task",
-		description: "Inspect same-parent background tasks (status, optional id), collect a finished result and its usage once (result, run id), cancel a task (cancel, run id), or list retained contexts (contexts: profile/model/thinking/cwd only, no output or usage claim), or release retained in-process context (release, continuation id or finished background task id; running tasks must be cancelled first). Result collection requires the launch branch or its descendant. No automatic follow-ups; handles expire on parent session shutdown/reload.",
+		description: "Inspect same-parent background tasks (status, optional id), collect a finished result and its usage once (result, run id), cancel a task (cancel, run id), or list retained contexts (contexts: profile/model/thinking/cwd only, no output or usage claim), or release retained in-process context (release, continuation id or finished background task id; running tasks must be cancelled first). Result collection requires the launch branch or its descendant. Background completion notifications are controlled at launch and by the human notifyOnComplete setting; this management tool does not schedule them. Handles expire on parent session shutdown/reload.",
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("status"), Type.Literal("result"), Type.Literal("cancel"), Type.Literal("release"), Type.Literal("contexts")]),
 			id: Type.Optional(Type.String({ minLength: 1, description: "Run id for status/result/cancel, continuation or finished task id for release; ignored by contexts." })),
@@ -59,6 +63,37 @@ export function registerForgeSubagentTaskTool(
 			} catch (error) {
 				return { content: [{ type: "text", text: `Subagent task operation failed: ${error instanceof Error ? error.message : String(error)}` }], details: { action: params.action, status: "failed" } };
 			}
+		},
+		renderCall(args, theme) {
+			return new Text(`${theme.fg("toolTitle", theme.bold("forge subagent task "))}${theme.fg("accent", plainSubagentText(args.action))}`, 0, 0);
+		},
+		renderResult(result, { expanded, isPartial }, theme) {
+			const text = plainSubagentText(result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"));
+			const details = result.details as { action?: string; tasks?: BackgroundTaskStatus[]; task?: BackgroundTaskStatus; response?: AgentResponse; usageCredited?: boolean; contexts?: ForgeContinuationSummary[]; status?: string } | undefined;
+			// A failed management operation is not a task: no profile/model/thinking line to invent.
+			if (details?.status === "failed") return new Text(`${theme.fg("error", "✗")} ${theme.fg("error", theme.bold("failed"))}\n${theme.fg("error", text)}`, 0, 0);
+			if (!details) return new Text(theme.fg("toolOutput", text), 0, 0);
+			const tasks = details.tasks ?? (details.task ? [details.task] : []);
+			if (tasks.length) {
+				const container = new Container();
+				for (const [index, task] of tasks.entries()) {
+					if (index) container.addChild({ render: () => [""], invalidate() {} });
+					container.addChild(renderSubagentCard({
+						profileId: task.profileId, title: task.title, status: task.status, execution: task.execution,
+						collected: task.collected, live: isPartial,
+						response: details.action === "result" ? details.response : undefined,
+						noNewUsageCredited: details.action === "result" && Boolean(details.response) && details.usageCredited === false,
+						output: details.action === "result" ? (expanded || details.response ? text : task.error ?? "Result not yet available.") : undefined,
+						warnings: task.error ? [{ level: task.status === "failed" ? "error" : "warning", code: "task.error", message: task.error }] : undefined,
+						details: [`Task: ${task.id}`, ...(task.execution ? [`Backend: ${task.execution.backendId}`, `Context: ${task.execution.contextMode}`] : []), ...(task.cwd ? [`Cwd: ${task.cwd}`] : []), ...(task.continuationId ? [`Retained child: ${task.continuationId}`] : [])],
+					}, expanded, theme));
+				}
+				return container;
+			}
+			if (details.contexts?.length) return new Text(details.contexts.map((context) =>
+				plainSubagentText(`${context.profileId} · ${context.model.provider}/${context.model.id} · thinking ${context.thinkingLevel ?? "unknown"}${expanded ? `\nContext: ${context.id} · retained\nBackend: ${context.backendId}\nCwd: ${context.cwd}` : ""}`)
+			).join("\n\n"), 0, 0);
+			return new Text(text, 0, 0);
 		},
 	});
 }

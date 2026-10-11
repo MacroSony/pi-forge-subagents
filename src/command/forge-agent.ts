@@ -8,6 +8,12 @@ import { backgroundTasksFor } from "../runtime/background-tasks.ts";
 import type { ForgeSubagentPreparedRun, ForgeSubagentRunHandle, ForgeSubagentRuntime } from "../runtime/subagent-runtime.ts";
 import { FORGE_THINKING_LEVELS, isForgeThinkingLevel, parseForgeSubagentModel, requestForgeSubagentApproval } from "../tool/forge-subagent.ts";
 import { canonicalProfileId, summarizeProfile } from "../tool/forge-subagent-profiles.ts";
+import { recordedUsageTaskIds, renderSubagentUsageReport, subagentUsageTasks, usageTaskLabels } from "../usage/report.ts";
+import { trySubagentView, withSubagentDialog } from "../ui/dialog-gate.ts";
+import { plainSubagentText } from "../ui/plain-text.ts";
+import { subagentViewScopeGuard } from "../ui/view-scope.ts";
+import { showReadOnlyView, type ReadOnlyView } from "../ui/read-only-view.ts";
+import type { BackgroundTaskStatus, BackgroundTaskResult } from "../runtime/background-tasks.ts";
 
 const registeredApis = new WeakSet<ExtensionAPI>();
 export const FORGE_AGENT_COMMAND_DESCRIPTION = "Plan, run, continue, or inspect human-approved subagent tasks";
@@ -82,6 +88,36 @@ export function createForgeAgentCommandHandler(
 				const contexts = backgroundTasksFor(runtime).contexts(ctx);
 				await showText(ctx, "pi-forge retained contexts", contexts.map((c) => `${c.id}: ${c.profileId} ${c.model.provider}/${c.model.id} thinking:${c.thinkingLevel} cwd:${c.cwd}`).join("\n") || "No retained contexts in this parent session.");
 			} catch (error) { ctx.ui.notify(`pi-forge-subagents: ${error instanceof Error ? error.message : String(error)}`, "error"); }
+			return;
+		}
+
+		if (command === "usage") {
+			const parsed = parseUsageArgs(rawRest);
+			if (!parsed.ok) { ctx.ui.notify(parsed.error, "warning"); return; }
+			try {
+				const scope = parsed.branch ? "branch" : "session";
+				const entries = parsed.branch ? ctx.sessionManager.getBranch() : ctx.sessionManager.getEntries();
+				const pending = branchUsageBackground(runtime, ctx);
+				const report = renderSubagentUsageReport(entries, pending, parsed.taskId, scope);
+				const running = pending.filter((r) => !r.task.collected && (r.task.status === "running" || r.task.status === "starting")).length;
+				const ready = pending.filter((r) => !r.task.collected && r.task.status !== "running" && r.task.status !== "starting").length;
+				const summary = ctx.hasUI && typeof ctx.ui.custom === "function" && !parsed.taskId
+					? `${report.split("\n\nTask index")[0]}\n\nLive on accessible launch branch: ${running} running; ${ready} completed/uncollected (excluded from recorded totals).\nLive usage/cache/estimated cost coverage may be incomplete or unknown; see task details.\nLive/pending details remain launch-branch gated. Viewing never collects, claims usage, or starts a model.`
+					: report;
+				await showHumanView(ctx, {
+					title: `pi-forge subagent usage — ${scope}`,
+					summary,
+					...(!parsed.taskId ? { tasks: subagentUsageTasks(entries, pending).map((task) => ({
+						...task, detail: () => {
+							// Refresh the gate on Enter; a branch/session switch cannot reuse live output/usage.
+							const currentEntries = parsed.branch ? ctx.sessionManager.getBranch() : ctx.sessionManager.getEntries();
+							return renderSubagentUsageReport(currentEntries, branchUsageBackground(runtime, ctx), task.id, scope);
+						},
+					})) } : {}),
+				});
+			} catch (error) {
+				ctx.ui.notify(`pi-forge-subagents: usage: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			}
 			return;
 		}
 
@@ -241,7 +277,7 @@ export function createForgeAgentArgumentCompletions(
 				const defaultCommands = ["backends", "config", "help", "list", "plan", "run"];
 				return defaultCommands.map((cmd) => ({ value: cmd, label: cmd }));
 			}
-			const allCommands = ["backends", "cancel", "config", "contexts", "help", "list", "plan", "release", "result", "run", "status"];
+			const allCommands = ["backends", "cancel", "config", "contexts", "help", "list", "plan", "release", "result", "run", "status", "usage"];
 			const matches = allCommands.filter((cmd) => cmd.startsWith(trimmed));
 			return matches.length > 0 ? matches.map((cmd) => ({ value: cmd, label: cmd })) : null;
 		}
@@ -253,6 +289,28 @@ export function createForgeAgentArgumentCompletions(
 
 		if (command === "plan" || command === "run") {
 			return await completePlanRunArguments(runtime, sessionProvider, contextProvider, rest, prefix, command);
+		}
+
+		if (command === "usage") {
+			const ctx = contextProvider?.();
+			if (!ctx) return null;
+			try {
+				const tokens = tokenize(rest);
+				const fragment = /\s$/.test(prefix) ? "" : tokens.at(-1)?.token ?? "";
+				const completed = /\s$/.test(prefix) ? tokens : tokens.slice(0, -1);
+				const parsed = parseUsageArgs(completed.map((t) => t.token).join(" "));
+				if (!parsed.ok) return null;
+				const base = prefix.slice(0, prefix.length - fragment.length);
+				const results: AutocompleteItem[] = [];
+				if (!parsed.branch && "--branch".startsWith(fragment)) results.push({ value: `${base}--branch`, label: "--branch", description: "Current-branch recorded receipts only (default: session)" });
+				if (!parsed.taskId && !fragment.startsWith("-")) {
+					const entries = parsed.branch ? ctx.sessionManager.getBranch() : ctx.sessionManager.getEntries();
+					const ids = [...new Set([...recordedUsageTaskIds(entries), ...branchUsageBackground(runtime, ctx).filter((r) => !r.task.collected).map((r) => r.task.id)])];
+					const labels = usageTaskLabels(ids);
+					results.push(...ids.filter((id) => id.startsWith(fragment) || labels.get(id)!.startsWith(fragment)).map((id) => ({ value: `${base}${labels.get(id)!}`, label: labels.get(id)!, description: `${parsed.branch ? "Current-branch" : "Session"} subagent usage (read-only)` })));
+				}
+				return results.length ? results : null;
+			} catch { return null; }
 		}
 
 		if (command === "cancel" || command === "result" || command === "status") {
@@ -347,6 +405,24 @@ function stripQuotes(str: string): string {
 		}
 	}
 	return str;
+}
+
+export type ParsedUsageArgs = { ok: true; branch: boolean; taskId?: string } | { ok: false; error: string };
+export function parseUsageArgs(raw: string): ParsedUsageArgs {
+	const error = "Usage: /forge-agent usage [short-task-id] [--branch] (default: all recorded Subagents receipts in this session)";
+	let branch = false;
+	let taskId: string | undefined;
+	for (const { token } of tokenize(raw)) {
+		if (token === "--branch") {
+			if (branch) return { ok: false, error };
+			branch = true;
+		} else {
+			const id = stripQuotes(token);
+			if (taskId !== undefined || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(id)) return { ok: false, error };
+			taskId = id;
+		}
+	}
+	return { ok: true, branch, ...(taskId !== undefined ? { taskId } : {}) };
 }
 
 function hasTaskStarted(completedTokens: readonly TokenSpan[]): boolean {
@@ -758,90 +834,64 @@ export function parsePlanRunArgs(command: string, rawOrRest: string | string[]):
 	};
 }
 
-async function showStatus(runtime: ForgeSubagentRuntime, ctx: ExtensionCommandContext, taskId?: string): Promise<void> {
-	const bgManager = backgroundTasksFor(runtime);
-	try {
-		const tasks = bgManager.status(ctx, taskId);
-		if (taskId) {
-			const task = tasks[0];
-			if (!task) {
-				ctx.ui.notify(`pi-forge-subagents: unknown background task: ${taskId}`, "warning");
-				return;
-			}
-			const lines = [
-				`Task ID: ${task.id}`,
-				`Profile: ${task.profileId}`,
-				`Status: ${task.status}`,
-				`Target CWD: ${task.cwd ?? "(parent workspace)"}`,
-				`Collected: ${task.collected ? "yes" : "no"}`,
-			];
-			if (task.continuationId) lines.push(`Retained context: ${task.continuationId}`);
-			if (task.error) lines.push(`Error: ${task.error}`);
-			await showText(ctx, `pi-forge background task: ${task.id}`, lines.join("\n"));
-			return;
-		}
-
-		if (tasks.length === 0) {
-			await showText(ctx, "pi-forge background tasks", "No background tasks in this parent session.");
-			return;
-		}
-
-		const lines = [
-			`Background tasks (${tasks.length}):`,
-			"",
-			...tasks.map((t) => {
-				const cwdStr = t.cwd ? ` cwd: ${t.cwd}` : "";
-				const errStr = t.error ? ` (error: ${t.error})` : "";
-				return `  ${t.id} [${t.status}] profile: ${t.profileId}${cwdStr} collected: ${t.collected ? "yes" : "no"}${errStr}${t.continuationId ? ` context: ${t.continuationId}` : ""}`;
-			}),
-		];
-		await showText(ctx, "pi-forge background tasks", lines.join("\n"));
-	} catch (error) {
-		ctx.ui.notify(`pi-forge-subagents: ${error instanceof Error ? error.message : String(error)}`, "error");
-	}
+/** status is session-wide; result(false) applies the launch-branch gate before displaying metadata. */
+function branchUsageBackground(runtime: ForgeSubagentRuntime, ctx: ExtensionContext): BackgroundTaskResult[] {
+	const manager = backgroundTasksFor(runtime);
+	return manager.status(ctx).flatMap((task) => {
+		try { return [manager.result(ctx, task.id, false)]; }
+		catch { return []; } // Foreign launch branches must not expose even task labels/profiles.
+	});
 }
 
-async function showResult(runtime: ForgeSubagentRuntime, ctx: ExtensionCommandContext, taskId: string): Promise<void> {
-	const bgManager = backgroundTasksFor(runtime);
+/** Uses only the public permitted metadata; legacy tasks honestly display unknown model/thinking. */
+function taskLabel(task: BackgroundTaskStatus & { title?: string }): string {
+	const execution = task.execution;
+	// title is already projected by the manager's launch-branch gate. Never reconstruct task text.
+	return `${task.title ? `${task.title} · ` : ""}${task.profileId} · ${execution ? `${execution.model.provider}/${execution.model.id}` : "model unknown"} · thinking:${execution?.thinkingLevel ?? "unknown"} · ${task.status}`;
+}
+function taskStatusText(task: BackgroundTaskStatus & { title?: string }): string {
+	const lines = [
+		`Task ID: ${task.id}`, ...(task.title ? [`Title: ${task.title}`] : []), `Profile: ${task.profileId}`, `Status: ${task.status}`,
+		`Model: ${task.execution ? `${task.execution.model.provider}/${task.execution.model.id}` : "unknown"}`,
+		`Thinking: ${task.execution?.thinkingLevel ?? "unknown"}`,
+		`Target CWD: ${task.cwd ?? "(parent workspace)"}`, `Collected: ${task.collected ? "yes" : "no"}`,
+	];
+	if (task.execution) lines.push(`Mode: ${task.execution.mode}; context: ${task.execution.contextMode}`);
+	if (task.continuationId) lines.push(`Retained context: ${task.continuationId}`);
+	if (task.error) lines.push(`Error: ${task.error}`);
+	return lines.join("\n");
+}
+function backgroundDetail(runtime: ForgeSubagentRuntime, ctx: ExtensionCommandContext, taskId: string): string {
+	// This gate is required even when session-wide recorded history is available.
+	const res = backgroundTasksFor(runtime).result(ctx, taskId, false);
+	return [
+		taskStatusText(res.task),
+		res.response ? renderResponse(res.response, res.task.cwd) : `Task has no completed output (${res.task.status}).`,
+		"Note: Native model usage accounting is reserved for tool-result collection; human inspection does not claim usage.",
+	].join("\n\n");
+}
+async function showStatus(runtime: ForgeSubagentRuntime, ctx: ExtensionCommandContext, taskId?: string): Promise<void> {
 	try {
-		// claimUsage=false ensures inspecting results via CLI never steals accounting from subsequent model collection.
-		const res = bgManager.result(ctx, taskId, false);
-		const task = res.task;
-		if (task.status === "starting" || task.status === "running") {
-			await showText(ctx, `pi-forge background result: ${taskId}`, [
-				`Task ID: ${task.id}`,
-				`Profile: ${task.profileId}`,
-				`Status: ${task.status}`,
-				`Target CWD: ${task.cwd ?? "(parent workspace)"}`,
-				"",
-				`Task is still in progress (${task.status}). Check status with '/forge-agent status ${taskId}'.`,
-			].join("\n"));
-			return;
-		}
+		const tasks = backgroundTasksFor(runtime).status(ctx, taskId);
+		if (taskId && !tasks[0]) { ctx.ui.notify(`pi-forge-subagents: unknown background task: ${taskId}`, "warning"); return; }
+		const listing = tasks.length ? `Background tasks (${tasks.length}):\n\n${tasks.map((task) => `  ${!ctx.hasUI ? `${task.id} ` : ""}${taskLabel(task)}${task.cwd ? ` cwd:${task.cwd}` : ""} collected:${task.collected ? "yes" : "no"}${task.error ? ` (error: ${task.error})` : ""}${task.continuationId ? ` context:${task.continuationId}` : ""}`).join("\n")}` : "No background tasks in this parent session.";
+		await showHumanView(ctx, {
+			title: taskId ? `pi-forge background task: ${taskId}` : "pi-forge background tasks",
+			summary: taskId ? taskStatusText(tasks[0]!) : ctx.hasUI && typeof ctx.ui.custom === "function" && tasks.length ? `Background tasks (${tasks.length}). Select a task for read-only output/details.\nOutput/usage remain launch-branch gated; viewing never collects or starts a model.` : listing,
+			...(!taskId ? { tasks: tasks.map((task) => ({ id: task.id, label: taskLabel(task), detail: () => backgroundDetail(runtime, ctx, task.id) })) } : {}),
+		});
+	} catch (error) { ctx.ui.notify(`pi-forge-subagents: ${error instanceof Error ? error.message : String(error)}`, "error"); }
+}
+async function showResult(runtime: ForgeSubagentRuntime, ctx: ExtensionCommandContext, taskId: string): Promise<void> {
+	try { await showHumanView(ctx, { title: `pi-forge background result: ${taskId}`, summary: backgroundDetail(runtime, ctx, taskId) }); }
+	catch (error) { ctx.ui.notify(`pi-forge-subagents: ${error instanceof Error ? error.message : String(error)}`, "error"); }
+}
 
-		if (!res.response) {
-			const lines = [
-				`Task ID: ${task.id}`,
-				`Profile: ${task.profileId}`,
-				`Status: ${task.status}`,
-				`Target CWD: ${task.cwd ?? "(parent workspace)"}`,
-			];
-			if (task.continuationId) lines.push(`Retained context: ${task.continuationId}`);
-			if (task.error) lines.push(`Error: ${task.error}`);
-			lines.push("", "Note: Native model usage accounting is reserved for tool-result collection; human inspection does not claim usage.");
-			await showText(ctx, `pi-forge background result: ${taskId}`, lines.join("\n"));
-			return;
-		}
-
-		const lines = [
-			renderResponse(res.response, task.cwd),
-			"",
-			"Note: Native model usage accounting is reserved for tool-result collection; human inspection does not claim usage.",
-		];
-		await showText(ctx, `pi-forge background result: ${taskId}`, lines.join("\n"));
-	} catch (error) {
-		ctx.ui.notify(`pi-forge-subagents: ${error instanceof Error ? error.message : String(error)}`, "error");
-	}
+/** The whole summary → selector → detail flow takes the parent's single dialog slot once. */
+async function showHumanView(ctx: ExtensionCommandContext, view: ReadOnlyView): Promise<void> {
+	if (!ctx.hasUI) { await showReadOnlyView(ctx, view); return; }
+	const opened = await trySubagentView(ctx.ui, () => showReadOnlyView(ctx, view));
+	if (!opened.opened) ctx.ui.notify("pi-forge-subagents: another Subagent dialog is active or queued; retry this read-only view after it closes.", "info");
 }
 
 async function handleCancel(runtime: ForgeSubagentRuntime, ctx: ExtensionCommandContext, taskId: string): Promise<void> {
@@ -910,6 +960,7 @@ async function showConfig(ctx: ExtensionCommandContext): Promise<void> {
 		`Backend: ${settings.backend ?? "(built-in pi-subprocess-readonly)"} (${settings.backendSource ?? "built-in"})`,
 		`Timeout: ${settings.timeoutMs} ms (${settings.timeoutSource})`,
 		`Allow unattended invocation: ${settings.allowAgentInvocationWithoutApproval ? "yes" : "no"}`,
+		`Background completion notifications: ${settings.notifyOnComplete ? "enabled" : "disabled"} (human master; idle delivery may start a model turn)`,
 		`Summary in tool description: ${settings.summaryInToolDescription ? "yes" : "no"} (${settings.summaryInToolDescriptionSource ?? "built-in"})`,
 		"",
 		"Profiles:",
@@ -1004,6 +1055,7 @@ async function showHelp(ctx: ExtensionCommandContext): Promise<void> {
 		"  /forge subagent config",
 		"  /forge subagent plan <profile> [options] [--] <task>",
 		"  /forge subagent run <profile> [options] [--] <task>",
+		"  /forge subagent usage [short-task-id] [--branch] (compatible: /forge-agent usage [short-task-id] [--branch])",
 		"  /forge subagent status [id]",
 		"  /forge subagent result <id>",
 		"  /forge subagent cancel <id>",
@@ -1017,7 +1069,8 @@ async function showHelp(ctx: ExtensionCommandContext): Promise<void> {
 		"  config    Print resolved subagent settings and profile policies with configuration sources.",
 		"  plan      Prepare and validate the exact delegated request without provider transport.",
 		"  run       Prepare the request, require interactive human approval, and execute one task (foreground or background).",
-		"  status    List all background tasks for this session, or check status of a specific task.",
+		"  usage     Read-only session totals for recorded Subagents receipts across all branches (main model excluded); --branch narrows history. Live/pending output and usage stay launch-branch gated. Add <id> for details or select a task in the UI. Legacy aliases/completion use the selected scope.",
+		"  status    Select a session background task for read-only details (Enter; Esc returns), or check status by ID. Headless mode lists text.",
 		"  result    Inspect background task output without claiming usage accounting.",
 		"  cancel    Cancel an active background task by ID.",
 		"  contexts  List retained context metadata without collecting output or usage.",
@@ -1041,8 +1094,13 @@ async function showHelp(ctx: ExtensionCommandContext): Promise<void> {
 
 async function showText(ctx: ExtensionCommandContext, title: string, text: string): Promise<void> {
 	if (ctx.hasUI) {
-		await ctx.ui.editor(title, text);
+		const isCurrent = subagentViewScopeGuard(ctx);
+		// Late run results and older info commands must not replace an approval.
+		await withSubagentDialog(ctx.ui, async () => {
+			if (!isCurrent()) { ctx.ui.notify("pi-forge-subagents: session/branch changed; repeat the command to view current information.", "warning"); return; }
+			await ctx.ui.editor(plainSubagentText(title), plainSubagentText(text));
+		});
 		return;
 	}
-	console.log(text);
+	console.log(plainSubagentText(text));
 }

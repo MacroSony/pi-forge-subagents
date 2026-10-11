@@ -1,5 +1,7 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isAllowedWorkingDirectory, loadForgeSubagentSettings, resolveSubagentProfilePolicy } from "../config/subagents.ts";
 import type { AgentResponse } from "../contract/index.ts";
+import { snapshotSubagentExecution, type SubagentExecutionDisplay } from "../ui/execution-display.ts";
 import type { ForgeSubagentContinuationSummary, ForgeSubagentPreparedRun, ForgeSubagentRunHandle, ForgeSubagentRuntime } from "./subagent-runtime.ts";
 
 export interface BackgroundTaskStatus {
@@ -8,6 +10,9 @@ export interface BackgroundTaskStatus {
 	cwd?: string;
 	status: "starting" | "running" | AgentResponse["status"];
 	collected: boolean;
+	execution?: SubagentExecutionDisplay;
+	/** Short request-task title; public views omit it outside the known launch branch/descendants. */
+	title?: string;
 	/** Present only for a terminal task whose retained context is still confirmed alive. */
 	continuationId?: string;
 	error?: string;
@@ -25,6 +30,10 @@ interface Task extends BackgroundTaskStatus {
 	leafId: string | null;
 	handle?: ForgeSubagentRunHandle;
 	response?: AgentResponse;
+	notifyOnComplete: boolean;
+	notificationDone: boolean;
+	unattended: boolean;
+	requiresModelOverridePermission: boolean;
 }
 export interface BackgroundTaskResult {
 	task: BackgroundTaskStatus;
@@ -39,9 +48,28 @@ export class ForgeBackgroundTasks {
 	private epoch = 0;
 	private readonly runtime: ForgeSubagentRuntime;
 	private readonly limit: number;
+	private readonly pendingNotifications = new Set<string>();
+	private notificationTimer: ReturnType<typeof setTimeout> | undefined;
+	private notificationDelivery: { pi: Pick<ExtensionAPI, "sendMessage">; context: () => ExtensionContext | undefined } | undefined;
 	constructor(runtime: ForgeSubagentRuntime, limit = 32) { this.runtime = runtime; this.limit = limit; }
 
-	async launch(prepared: ForgeSubagentPreparedRun, ctx: ExtensionContext): Promise<BackgroundTaskStatus> {
+	/** The extension owns delivery and supplies the live parent context, never a launch-time snapshot. */
+	configureNotifications(pi: Pick<ExtensionAPI, "sendMessage">, context: () => ExtensionContext | undefined): () => void {
+		const delivery = { pi, context };
+		this.clearNotifications();
+		this.notificationDelivery = delivery;
+		return () => {
+			if (this.notificationDelivery !== delivery) return;
+			this.notificationDelivery = undefined;
+			this.clearNotifications();
+		};
+	}
+
+	async launch(prepared: ForgeSubagentPreparedRun, ctx: ExtensionContext, options: {
+		notifyOnComplete?: boolean;
+		unattended?: boolean;
+		requiresModelOverridePermission?: boolean;
+	} = {}): Promise<BackgroundTaskStatus> {
 		if (!this.runtime.start) throw new Error("Background execution requires the updated subagent runtime adapter.");
 		for (const [id, task] of this.tasks) {
 			if (this.tasks.size < this.limit) break;
@@ -51,10 +79,18 @@ export class ForgeBackgroundTasks {
 		const id = prepared.plan.runId;
 		if (this.tasks.has(id)) throw new Error("This prepared run was already launched.");
 		const epoch = this.epoch;
+		const title = shortTaskTitle(prepared.request?.input?.text);
 		const task: Task = {
 			id, profileId: prepared.plan.profile.profileId, cwd: prepared.cwd,
+			execution: snapshotSubagentExecution(prepared, "background"),
+			...(title ? { title } : {}),
 			status: "starting", collected: false, sessionId: ctx.sessionManager.getSessionId(),
 			parentCwd: ctx.cwd, leafId: ctx.sessionManager.getLeafId?.() ?? null,
+			// Both gates apply at launch AND delivery. Turning the master on later cannot revive an opted-out run.
+			notifyOnComplete: Boolean(this.notificationDelivery) && options.notifyOnComplete !== false && loadForgeSubagentSettings(ctx).notifyOnComplete === true,
+			notificationDone: false,
+			unattended: options.unattended ?? false,
+			requiresModelOverridePermission: options.requiresModelOverridePermission ?? false,
 		};
 		// Reserve before awaiting start, so parallel launches respect the bound.
 		this.tasks.set(id, task);
@@ -72,12 +108,14 @@ export class ForgeBackgroundTasks {
 				if (epoch !== this.epoch || this.tasks.get(id) !== task) return;
 				task.response = response;
 				task.status = response.status;
+				this.enqueueNotification(task);
 			}, (error: unknown) => {
 				if (epoch !== this.epoch || this.tasks.get(id) !== task) return;
 				task.status = "failed";
 				task.error = error instanceof Error ? error.message : String(error);
+				this.enqueueNotification(task);
 			});
-			return publicStatus(task);
+			return this.view(task, ctx);
 		} catch (error) {
 			if (this.tasks.get(id) === task) this.tasks.delete(id);
 			throw error;
@@ -133,19 +171,89 @@ export class ForgeBackgroundTasks {
 		const ready = task.status !== "starting" && task.status !== "running";
 		const creditUsage = ready && Boolean(task.response) && claimUsage && !task.collected;
 		// Synchronous claim: concurrent result tools cannot both emit usage.
-		if (ready && claimUsage) task.collected = true;
+		if (ready && claimUsage) {
+			task.collected = true;
+			this.pendingNotifications.delete(task.id);
+		}
 		return { task: this.view(task, ctx), ...(task.response ? { response: structuredClone(task.response) } : {}), creditUsage };
 	}
 
 	async cancel(ctx: ExtensionContext, id: string): Promise<BackgroundTaskStatus> {
 		const task = this.owned(ctx, id);
 		if (task.status === "starting") throw new Error("Task is still starting; retry cancellation once the launch returns.");
+		// Suppress before awaiting: a terminal callback during cancellation must not wake the parent.
+		task.notifyOnComplete = false;
+		this.pendingNotifications.delete(task.id);
 		await task.handle?.cancel("Cancelled by parent request.");
 		return this.view(task, ctx);
 	}
 
 	/** Invalidate results immediately; runtime.dispose() drains actual child work. */
-	clear(): void { this.epoch++; this.tasks.clear(); }
+	clear(): void { this.epoch++; this.clearNotifications(); this.tasks.clear(); }
+
+	private clearNotifications(): void {
+		if (this.notificationTimer !== undefined) clearTimeout(this.notificationTimer);
+		this.notificationTimer = undefined;
+		this.pendingNotifications.clear();
+	}
+
+	private enqueueNotification(task: Task): void {
+		if (!this.notificationDelivery || !task.notifyOnComplete || task.notificationDone || task.collected || task.status === "cancelled") return;
+		this.pendingNotifications.add(task.id);
+		if (this.notificationTimer !== undefined) return;
+		// One ephemeral tick coalesces simultaneous terminal callbacks. No polling or durable worker.
+		this.notificationTimer = setTimeout(() => {
+			this.notificationTimer = undefined;
+			this.deliverNotifications();
+		}, 0);
+	}
+
+	private deliverNotifications(): void {
+		const delivery = this.notificationDelivery;
+		const ids = [...this.pendingNotifications];
+		this.pendingNotifications.clear();
+		if (!delivery) return;
+		try {
+			const ctx = delivery.context();
+			if (!ctx) return;
+			const settings = loadForgeSubagentSettings(ctx);
+			const eligible: Task[] = [];
+			for (const id of ids) {
+				const task = this.tasks.get(id);
+				if (!task || task.notificationDone) continue;
+				// Invalid context is safely suppressed, not replayed when trust/branch later changes.
+				task.notificationDone = true;
+				if (!task.notifyOnComplete || task.collected || task.status === "starting" || task.status === "running" || task.status === "cancelled") continue;
+				if (!this.sameOwner(task, ctx) || !ctx.isProjectTrusted() || settings.notifyOnComplete !== true) continue;
+				if (task.leafId !== null && ctx.sessionManager.getLeafId?.() !== task.leafId &&
+					!ctx.sessionManager.getBranch().some((entry) => entry.id === task.leafId)) continue;
+				const policy = resolveSubagentProfilePolicy(settings, task.profileId);
+				if (!policy.enabled) continue;
+				if (task.unattended && (!settings.allowAgentInvocationWithoutApproval ||
+					(task.requiresModelOverridePermission && !policy.allowAgentModelOverrides) ||
+					(task.cwd && !isAllowedWorkingDirectory(settings, task.cwd, task.parentCwd)))) continue;
+				eligible.push(task);
+			}
+			if (eligible.length === 0) return;
+			// Only safe, short handles/statuses; NEVER prompt, output, profile, cwd, error or usage.
+			const rows = eligible.filter((task) => /^[a-zA-Z0-9_-]{1,24}$/.test(task.id))
+				.map((task) => `${task.id}: ${task.status}`);
+			if (rows.length === 0) return;
+			delivery.pi.sendMessage({
+				customType: "forge-subagent-completion",
+				content: `Background subagent tasks finished: ${rows.join("; ")}. Call forge_subagent_task action result with each task id to collect the result.`,
+				// Display metadata only; SDK convertToLlm forwards content, not details.
+				details: { tasks: rows.map((row) => {
+					const [id, status] = row.split(": ");
+					return { id, status };
+				}) },
+				display: true,
+			}, ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "steer" });
+		} catch {
+			// Fail closed: invalidated contexts / unavailable SDK delivery must not retry and revive wakes.
+			// Task status/result remain readable through the existing controls.
+		}
+	}
 
 	private alive(continuationId: string, ctx: ExtensionContext): boolean {
 		// Legacy adapters cannot confirm liveness; production runtimes can.
@@ -154,6 +262,12 @@ export class ForgeBackgroundTasks {
 	}
 	private view(task: Task, ctx: ExtensionContext): BackgroundTaskStatus {
 		const status = publicStatus(task);
+		// Task text is branch-sensitive even when selected model metadata is same-owner visible.
+		// Unknown legacy/null launch leaves fail closed for titles (the existing result gate is unchanged).
+		if (task.title && this.sameOwner(task, ctx) && task.leafId !== null &&
+			(ctx.sessionManager.getLeafId?.() === task.leafId || ctx.sessionManager.getBranch().some((entry) => entry.id === task.leafId))) {
+			status.title = task.title;
+		}
 		const continuationId = task.response?.continuationId;
 		if (continuationId && this.alive(continuationId, ctx)) status.continuationId = continuationId;
 		return status;
@@ -168,8 +282,15 @@ export class ForgeBackgroundTasks {
 	}
 }
 
+function shortTaskTitle(text: unknown): string | undefined {
+	if (typeof text !== "string") return undefined;
+	const chars = Array.from(text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim());
+	if (!chars.length) return undefined;
+	return chars.length <= 100 ? chars.join("") : `${chars.slice(0, 97).join("")}...`;
+}
+
 function publicStatus(task: Task): BackgroundTaskStatus {
-	return { id: task.id, profileId: task.profileId, ...(task.cwd ? { cwd: task.cwd } : {}), status: task.status, collected: task.collected, ...(task.error ? { error: task.error } : {}) };
+	return { id: task.id, profileId: task.profileId, ...(task.cwd ? { cwd: task.cwd } : {}), status: task.status, collected: task.collected, ...(task.execution ? { execution: structuredClone(task.execution) } : {}), ...(task.error ? { error: task.error } : {}) };
 }
 
 const managers = new WeakMap<ForgeSubagentRuntime, ForgeBackgroundTasks>();

@@ -20,7 +20,7 @@ import {
 export const PROJECT_SUBAGENT_SETTINGS_TAB_ID = "subagent-config-project";
 export const GLOBAL_SUBAGENT_SETTINGS_TAB_ID = "subagent-config-global";
 const SUBAGENT_SETTINGS_ICON = "⚙";
-const FORM_FIELDS = ["backend", "timeoutMs", "allowAgentInvocationWithoutApproval", "allowAgentModelOverrides", "summaryInToolDescription", "profiles"] as const;
+const FORM_FIELDS = ["backend", "timeoutMs", "allowAgentInvocationWithoutApproval", "allowAgentModelOverrides", "notifyOnComplete", "summaryInToolDescription", "profiles"] as const;
 const PROFILE_FIELDS = ["enabled", "backend", "timeoutMs", "allowAgentModelOverrides"] as const;
 const MODEL_OVERRIDE_DESCRIPTION = "Permits an agent to supply a single-run model (provider/id) and/or thinkingLevel override; omitted fields keep the profile values. Enabling never switches models automatically, and an unsupported model or thinking level is an error, not a fallback. There is no model allowlist: an override can change cost and send prompt data to a different provider. Inherit removes this scope's override.";
 const BOOLEAN_CHOICES = [
@@ -83,6 +83,13 @@ export function buildSubagentSettingsSchema(
 				description: MODEL_OVERRIDE_DESCRIPTION,
 			},
 			{
+				key: "notifyOnComplete",
+				label: "Notify on background completion",
+				type: "enum",
+				options: booleanOptions(),
+				description: "Human opt-in master switch (built-in default: Disabled). Enabled lets background runs send one completion notification, which can start a parent model turn when idle; Disabled prevents all completion wakes, even when a run requests one. Notifications contain only task ID/status; results are collected separately. Inherit removes this scope's override.",
+			},
+			{
 				key: "summaryInToolDescription",
 				label: "Summarize profiles in tool description",
 				type: "enum",
@@ -132,6 +139,7 @@ export function scopedConfigToContributionValues(rawConfig: Record<string, unkno
 		timeoutMs: isValidSubagentTimeoutMs(rawConfig.timeoutMs) ? rawConfig.timeoutMs : "",
 		allowAgentInvocationWithoutApproval: booleanChoice(rawConfig.allowAgentInvocationWithoutApproval),
 		allowAgentModelOverrides: failClosedBooleanChoice(rawConfig, "allowAgentModelOverrides"),
+		notifyOnComplete: failClosedBooleanChoice(rawConfig, "notifyOnComplete"),
 		summaryInToolDescription: booleanChoice(rawConfig.summaryInToolDescription),
 		profiles,
 	};
@@ -209,6 +217,7 @@ export function writeScopedSubagentSettings(
 	if (Object.hasOwn(values, "timeoutMs")) applyOptionalTimeout(next, "timeoutMs", values.timeoutMs);
 	if (Object.hasOwn(values, "allowAgentInvocationWithoutApproval")) applyBooleanChoice(next, "allowAgentInvocationWithoutApproval", values.allowAgentInvocationWithoutApproval);
 	if (Object.hasOwn(values, "allowAgentModelOverrides")) applyBooleanChoice(next, "allowAgentModelOverrides", values.allowAgentModelOverrides);
+	if (Object.hasOwn(values, "notifyOnComplete")) applyBooleanChoice(next, "notifyOnComplete", values.notifyOnComplete);
 	if (Object.hasOwn(values, "summaryInToolDescription")) applyBooleanChoice(next, "summaryInToolDescription", values.summaryInToolDescription);
 
 	if (Object.hasOwn(values, "profiles")) {
@@ -249,7 +258,7 @@ function validateScopedValues(
 	if (values.timeoutMs !== undefined && values.timeoutMs !== "" && !isValidSubagentTimeoutMs(values.timeoutMs)) {
 		errors.timeoutMs = `Timeout must be an integer from ${MIN_SUBAGENT_TIMEOUT_MS} to ${MAX_SUBAGENT_TIMEOUT_MS} milliseconds.`;
 	}
-	for (const key of ["allowAgentInvocationWithoutApproval", "allowAgentModelOverrides", "summaryInToolDescription"] as const) {
+	for (const key of ["allowAgentInvocationWithoutApproval", "allowAgentModelOverrides", "notifyOnComplete", "summaryInToolDescription"] as const) {
 		if (values[key] !== undefined && (typeof values[key] !== "string" || !["inherit", "enabled", "disabled"].includes(values[key] as string))) {
 			errors[key] = "Choose Inherit, Enabled, or Disabled.";
 		}

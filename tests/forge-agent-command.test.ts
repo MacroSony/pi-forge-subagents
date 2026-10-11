@@ -35,6 +35,7 @@ test("forge-agent config prints resolved settings with sources", async () => {
 	assert.match(editors[0]!.text, /Resolved subagent settings:/);
 	assert.match(editors[0]!.text, /Backend:/);
 	assert.match(editors[0]!.text, /Timeout:/);
+	assert.match(editors[0]!.text, /Background completion notifications: (enabled|disabled) \(human master;/);
 	assert.match(editors[0]!.text, /Profiles:/);
 });
 

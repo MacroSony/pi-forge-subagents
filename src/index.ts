@@ -10,6 +10,8 @@ import { backgroundTasksFor } from "./runtime/background-tasks.ts";
 import { canonicalProfileId, registerForgeSubagentProfilesTool, renderEmbeddedSummaryText, summarizeProfile } from "./tool/forge-subagent-profiles.ts";
 import { loadForgeSubagentSettings, resolveSubagentProfilePolicy } from "./config/subagents.ts";
 import { createForgeSubagentSettingsContribution } from "./ui-contribution/subagent-settings-contribution.ts";
+import { registerForgeSubagentUsageBridge } from "./usage/receipts.ts";
+import { registerCompletionMessageRenderer } from "./ui/completion-message.ts";
 
 export { ForgeHostSession } from "./host/session.ts";
 export type { ForgeHostSessionOptions } from "./host/session.ts";
@@ -46,6 +48,9 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 	let settingsContributionContext: any;
 	let unregisterForgeAgent: (() => void) | undefined;
 	const runtime = createForgeSubagentRuntime(() => session);
+	const stopUsageBridge = registerForgeSubagentUsageBridge(pi);
+	const stopNotifications = backgroundTasksFor(runtime).configureNotifications(pi, () => currentContext);
+	registerCompletionMessageRenderer(pi);
 
 	function startSettingsContribution(ctx: any): void {
 		settingsContribution?.stop();
@@ -200,6 +205,8 @@ export default function piForgeSubagents(pi: ExtensionAPI): ForgeSubagentsExtens
 		},
 		dispose() {
 			disposed = true;
+			stopUsageBridge();
+			stopNotifications();
 			backgroundTasksFor(runtime).clear();
 			lifecycleGeneration++;
 			stopForgeAgentCommand();

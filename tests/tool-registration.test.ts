@@ -247,7 +247,7 @@ test("forge_subagent applies per-call model override for interactively approved 
 	}
 });
 
-test("forge_subagent renderers show live progress, approval receipt, and usage stats", () => {
+test("forge_subagent completed renderer keeps progress, compact approval, expanded receipt, and usage", () => {
 	let captured: any;
 	const pi = { registerTool: (tool: any) => { captured = tool; } } as any;
 	const runtime: ForgeSubagentRuntime = {
@@ -265,7 +265,7 @@ test("forge_subagent renderers show live progress, approval receipt, and usage s
 	assert.match(call.render(100).join("\n"), /forge subagent/);
 
 	const details = {
-		status: "running",
+		status: "completed",
 		profileId: "project:worker",
 		task: "Inspect this code carefully.",
 		approval: { required: true, approved: true, viewedFullPrompt: true, source: "human", executionFingerprint: "fp", approvedAt: "2026-07-14T00:00:00.000Z" },
@@ -284,8 +284,8 @@ test("forge_subagent renderers show live progress, approval receipt, and usage s
 
 	const collapsed = captured.renderResult(resultArg, { expanded: false, isPartial: true }, theme, {});
 	const collapsedText = collapsed.render(100).join("\n");
-	assert.match(collapsedText, /live/);
-	assert.match(collapsedText, /approved after full-prompt review/);
+	assert.doesNotMatch(collapsedText, /live/);
+	assert.doesNotMatch(collapsedText, /approved|after full-prompt review|Approval:|trusted config/);
 	assert.match(collapsedText, /10 input/);
 
 	const expanded = captured.renderResult(resultArg, { expanded: true, isPartial: false }, theme, {});

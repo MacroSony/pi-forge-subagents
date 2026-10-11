@@ -42,6 +42,9 @@ for (const [id, initial] of [["read-worker", ["read"]], ["empty-worker", []]]) {
   }));
 }
 writeFileSync(join(configDir, "subagents.json"), JSON.stringify({
+  // This existing fixture tests manual polling/one-time collection. The separate
+  // packed-usage-notify fixture exercises enabled notifications and idle wakes.
+  notifyOnComplete: false,
   allowAgentInvocationWithoutApproval: true, allowedWorkingDirectories: [target],
   profiles: Object.fromEntries(["read-worker", "empty-worker"].map((id) =>
     [`project:${id}`, { enabled: true, backend: "pi-inprocess" }])),
@@ -152,7 +155,7 @@ try {
   // only src tests. Default-off rejection, authorized model/thinking selection,
   // retained inheritance/revocation and short handle cleanup are all non-egress.
   const configPath = join(configDir, "subagents.json");
-  const enabledConfig = {allowAgentInvocationWithoutApproval:true, allowedWorkingDirectories:[target],
+  const enabledConfig = {notifyOnComplete:false, allowAgentInvocationWithoutApproval:true, allowedWorkingDirectories:[target],
     profiles:Object.fromEntries(["read-worker","empty-worker"].map((id)=>[`project:${id}`,{enabled:true,backend:"pi-inprocess"}]))};
   const requested = {profileId:"project:empty-worker",task:"PACKED-OVERRIDE",model:`${provider}/${alternateId}`,thinkingLevel:"high",keepContext:true};
   const callsBefore=transcripts.length;
